@@ -60,8 +60,10 @@
     <integer>2</integer>
   </array>
 
-  <!-- Read by App.cpp on iOS via SDL_GetHint(); allows overriding the
-       default 180.93.43.39:44405 endpoint without recompiling. -->
+  <!-- Server endpoint override. Copied into SDL hints at startup by
+       PlatformBootstrapIos.mm (SDL_GetHint does NOT read Info.plist on
+       its own). Edit these to point a build at a different server
+       without recompiling. -->
   <key>MU.server.host</key>
   <string>180.93.43.39</string>
   <key>MU.server.port</key>

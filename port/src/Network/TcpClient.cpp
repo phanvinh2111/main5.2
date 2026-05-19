@@ -268,6 +268,12 @@ void TcpClient::worker_main() {
                 std::lock_guard<std::mutex> lock(error_mu_);
                 error_ = "send() failed";
                 state_.store(TcpState::Failed, std::memory_order_release);
+                // The inner break only escapes the per-frame send loop;
+                // we also need to stop the outer I/O pump so the worker
+                // doesn't keep polling a dead socket (and so the original
+                // "send() failed" message isn't clobbered by a follow-up
+                // "recv() failed" from the next iteration).
+                should_stop_.store(true, std::memory_order_release);
                 break;
             }
         }

@@ -114,7 +114,11 @@ port/
 │   │   ├── CharacterScene.{h,cpp}
 │   │   └── MainScene.{h,cpp}
 │   └── Platform/
-│       └── Log.{h,cpp}         # Thin SDL_Log wrapper
+│       ├── Log.{h,cpp}              # Thin SDL_Log wrapper
+│       ├── PlatformBootstrap.h     # Per-platform startup hook
+│       ├── PlatformBootstrapDesktop.cpp  # desktop: no-op
+│       ├── PlatformBootstrapAndroid.cpp  # android: no-op (Java side TBD)
+│       └── PlatformBootstrapIos.mm      # iOS: Info.plist -> SDL_SetHint
 └── platform/
     ├── ios/
     │   ├── Info.plist
@@ -138,7 +142,19 @@ The mobile client connects to:
 180.93.43.39:44405
 ```
 
-This is overridable at runtime via the `MU_SERVER_HOST` / `MU_SERVER_PORT`
-environment variables on desktop, and via SDL hints `MU.server.host` /
-`MU.server.port` on iOS/Android (set them in `Info.plist`/`local.properties`
-respectively, or wire to a UI in M2).
+The endpoint is overridable at runtime through two distinct channels:
+
+* **Desktop**: set the `MU_SERVER_HOST` / `MU_SERVER_PORT` environment
+  variables before launching `mumobile`.
+* **iOS**: edit the `MU.server.host` / `MU.server.port` keys in
+  `port/platform/ios/Info.plist`. `PlatformBootstrapIos.mm` runs at
+  startup, reads these from `NSBundle.mainBundle.infoDictionary`, and
+  publishes them via `SDL_SetHint()`. (SDL itself does NOT read
+  `Info.plist`, so this bridge is what makes the override work.)
+* **Android**: M2 will add a Java-side `SDL_SetHint` call that reads
+  the values from `BuildConfig` (populated from `local.properties`).
+  Until then, the CMake-baked default wins on Android.
+
+`App::init()` first checks the env var (desktop) then the SDL hint
+(`MU.server.host` / `MU.server.port`), then falls back to the CMake
+compile-time default. Resolution lives in `port/src/App.cpp`.

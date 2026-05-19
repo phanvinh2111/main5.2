@@ -34,7 +34,7 @@ endif()
 # ---------------------------------------------------------------------------
 # mumobile core library
 # ---------------------------------------------------------------------------
-add_library(mumobile_core STATIC
+set(MUMOBILE_CORE_SOURCES
     src/App.cpp
     src/Platform/Log.cpp
     src/Network/TcpClient.cpp
@@ -47,6 +47,19 @@ add_library(mumobile_core STATIC
     src/Scene/MainScene.cpp
     src/Render/Renderer.cpp
 )
+
+# Per-platform bootstrap (no-op on desktop; bridges Info.plist -> SDL hints
+# on iOS; future Android Java->native bridge lives next to it).
+if(MUMOBILE_PLATFORM STREQUAL "IOS")
+    enable_language(OBJCXX)
+    list(APPEND MUMOBILE_CORE_SOURCES src/Platform/PlatformBootstrapIos.mm)
+elseif(MUMOBILE_PLATFORM STREQUAL "ANDROID")
+    list(APPEND MUMOBILE_CORE_SOURCES src/Platform/PlatformBootstrapAndroid.cpp)
+else()
+    list(APPEND MUMOBILE_CORE_SOURCES src/Platform/PlatformBootstrapDesktop.cpp)
+endif()
+
+add_library(mumobile_core STATIC ${MUMOBILE_CORE_SOURCES})
 
 target_include_directories(mumobile_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include

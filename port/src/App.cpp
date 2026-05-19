@@ -2,6 +2,7 @@
 
 #include "Config.h"
 #include "Platform/Log.h"
+#include "Platform/PlatformBootstrap.h"
 #include "Scene/CharacterScene.h"
 #include "Scene/LoadingScene.h"
 #include "Scene/LogInScene.h"
@@ -20,22 +21,40 @@ namespace mu {
 App::App()  = default;
 App::~App() { shutdown(); }
 
+// Naming convention:
+//   * Environment variables use C-identifier names (MU_SERVER_HOST). Only
+//     consulted on desktop, where std::getenv is meaningful.
+//   * SDL hint names use the dotted MU.server.host form, matching the keys
+//     in port/platform/ios/Info.plist and the README. SDL_GetHint does NOT
+//     read Info.plist by itself; the iOS bootstrap in platform::bootstrap
+//     copies the relevant Info.plist entries into SDL hints via
+//     SDL_SetHint() during App::init().
 namespace {
 
-std::string env_or_default(const char* key, const char* fallback) {
+std::string read_env(const char* var) {
 #if defined(MUMOBILE_DESKTOP)
-    if (const char* v = std::getenv(key); v && *v) return v;
+    if (const char* v = std::getenv(var); v && *v) return v;
 #else
-    (void)key;
+    (void)var;
 #endif
-    // SDL hints work on every platform — Android can set them via
-    // SDL_SetHint() from Java, iOS via Info.plist preferences.
-    if (const char* h = SDL_GetHint(key); h && *h) return h;
+    return {};
+}
+
+std::string read_hint(const char* hint) {
+    if (const char* h = SDL_GetHint(hint); h && *h) return h;
+    return {};
+}
+
+std::string resolve_string(const char* env_var, const char* hint_name,
+                           const char* fallback) {
+    if (auto v = read_env(env_var);  !v.empty()) return v;
+    if (auto v = read_hint(hint_name); !v.empty()) return v;
     return fallback;
 }
 
-unsigned short env_or_default_port(const char* key, unsigned short fb) {
-    auto s = env_or_default(key, "");
+unsigned short resolve_port(const char* env_var, const char* hint_name,
+                            unsigned short fb) {
+    auto s = resolve_string(env_var, hint_name, "");
     if (s.empty()) return fb;
     long v = std::strtol(s.c_str(), nullptr, 10);
     if (v <= 0 || v > 65535) return fb;
@@ -50,6 +69,12 @@ bool App::init() {
         return false;
     }
 
+    // Per-platform startup work that has to run before we query SDL hints:
+    // on iOS this copies the Info.plist server-override entries into SDL
+    // hints. On other platforms it's a no-op (M2 will add the Android Java
+    // counterpart).
+    platform::bootstrap();
+
     window_ = SDL_CreateWindow(kAppTitle, kWinWidth, kWinHeight,
                                SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
     if (!window_) {
@@ -60,8 +85,10 @@ bool App::init() {
         return false;
     }
 
-    server_host_ = env_or_default("MU_SERVER_HOST", kDefaultServerHost);
-    server_port_ = env_or_default_port("MU_SERVER_PORT", kDefaultServerPort);
+    server_host_ = resolve_string("MU_SERVER_HOST", "MU.server.host",
+                                  kDefaultServerHost);
+    server_port_ = resolve_port("MU_SERVER_PORT", "MU.server.port",
+                                kDefaultServerPort);
     log::info("App: target server = %s:%u", server_host_.c_str(),
               static_cast<unsigned>(server_port_));
 
