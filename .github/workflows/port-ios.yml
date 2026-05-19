@@ -1,0 +1,60 @@
+name: port iOS smoke (M1)
+
+on:
+  push:
+    paths:
+      - 'port/**'
+      - '.github/workflows/port-ios.yml'
+  pull_request:
+    paths:
+      - 'port/**'
+      - '.github/workflows/port-ios.yml'
+
+# Verify that the port/ subtree compiles for the iOS Simulator on an
+# Apple-silicon macOS runner. M1 ships an unsigned bundle only; M17 will
+# add code-signed builds.
+jobs:
+  ios-simulator:
+    name: ios simulator (arm64)
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: select Xcode
+        run: |
+          sudo xcode-select -s /Applications/Xcode_15.4.app/Contents/Developer || \
+            sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+          xcodebuild -version
+
+      - name: configure CMake (Xcode generator, iOS Simulator SDK)
+        run: |
+          cmake -S port -B port/build-ios -G Xcode \
+            -DCMAKE_SYSTEM_NAME=iOS \
+            -DCMAKE_OSX_SYSROOT=iphonesimulator \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0 \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DMUMOBILE_PLATFORM=IOS \
+            -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED=NO \
+            -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGN_IDENTITY="" \
+            -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_REQUIRED=NO
+
+      - name: build mumobile (Debug, iphonesimulator)
+        run: |
+          cmake --build port/build-ios --config Debug --target mumobile
+
+      - name: verify .app bundle was produced
+        run: |
+          set -eux
+          APP_DIR=$(find port/build-ios -type d -name 'mumobile.app' -print -quit)
+          test -n "$APP_DIR"
+          test -x "$APP_DIR/mumobile"
+          test -f "$APP_DIR/Info.plist"
+          ls -l "$APP_DIR"
+
+      - name: dump Info.plist (sanity check)
+        run: |
+          APP_DIR=$(find port/build-ios -type d -name 'mumobile.app' -print -quit)
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP_DIR/Info.plist"
+          /usr/libexec/PlistBuddy -c 'Print :MU.server.host'     "$APP_DIR/Info.plist"
+          /usr/libexec/PlistBuddy -c 'Print :MU.server.port'     "$APP_DIR/Info.plist"

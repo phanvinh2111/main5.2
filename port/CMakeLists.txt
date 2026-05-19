@@ -94,15 +94,30 @@ if(MUMOBILE_PLATFORM STREQUAL "ANDROID")
     add_library(main SHARED src/Platform/AndroidMain.cpp)
     target_link_libraries(main PRIVATE mumobile_core)
 elseif(MUMOBILE_PLATFORM STREQUAL "IOS")
-    add_executable(mumobile MACOSX_BUNDLE src/Platform/DesktopMain.cpp)
+    set(MUMOBILE_IOS_LAUNCH_STORYBOARD
+        ${CMAKE_CURRENT_SOURCE_DIR}/platform/ios/LaunchScreen.storyboard)
+
+    add_executable(mumobile MACOSX_BUNDLE
+        src/Platform/DesktopMain.cpp
+        ${MUMOBILE_IOS_LAUNCH_STORYBOARD})
     target_link_libraries(mumobile PRIVATE mumobile_core)
+
+    # Bundle resources: the storyboard has to be compiled by ibtool and
+    # copied into the .app bundle root so UIKit can find it.
+    set_source_files_properties(${MUMOBILE_IOS_LAUNCH_STORYBOARD}
+        PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
+
     set_target_properties(mumobile PROPERTIES
         MACOSX_BUNDLE_INFO_PLIST ${CMAKE_CURRENT_SOURCE_DIR}/platform/ios/Info.plist
         MACOSX_BUNDLE_GUI_IDENTIFIER com.munique.mu
         MACOSX_BUNDLE_BUNDLE_NAME "MU Mobile"
         MACOSX_BUNDLE_BUNDLE_VERSION "0.1.0"
         MACOSX_BUNDLE_SHORT_VERSION_STRING "0.1.0"
-        XCODE_ATTRIBUTE_TARGETED_DEVICE_FAMILY "1,2")
+        XCODE_ATTRIBUTE_TARGETED_DEVICE_FAMILY "1,2"
+        # M1 ships an unsigned simulator build only; M17 owns code signing.
+        XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED "NO"
+        XCODE_ATTRIBUTE_CODE_SIGN_IDENTITY ""
+        XCODE_ATTRIBUTE_CODE_SIGNING_REQUIRED "NO")
 else()
     add_executable(mumobile src/Platform/DesktopMain.cpp)
     target_link_libraries(mumobile PRIVATE mumobile_core)
