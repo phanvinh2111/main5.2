@@ -1,0 +1,22 @@
+// MU Mobile — Android Gradle settings.
+//
+// The native code lives in `port/` and is reused verbatim across iOS,
+// Android, and the desktop dev build. This Gradle project is just a
+// thin Android wrapper around `port/CMakeLists.txt`.
+
+pluginManagement {
+    repositories {
+        gradlePluginPortal()
+        google()
+        mavenCentral()
+    }
+}
+dependencyResolutionManagement {
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+rootProject.name = "MUMobile"
+include(":app")

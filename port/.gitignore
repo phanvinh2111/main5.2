@@ -1,0 +1,14 @@
+build/
+build-*/
+.cmake/
+.vs/
+.vscode/
+.idea/
+.gradle/
+local.properties
+*.iml
+**/_deps/
+DerivedData/
+*.xcodeproj/xcuserdata/
+*.xcodeproj/project.xcworkspace/xcuserdata/
+*.user

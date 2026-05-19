@@ -1,0 +1,99 @@
+cmake_minimum_required(VERSION 3.22)
+project(mumobile
+    VERSION 0.1.0
+    DESCRIPTION "MU Online 5.2 — SDL3 iOS/Android port (Milestone 1)"
+    LANGUAGES C CXX)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
+set(MUMOBILE_PLATFORM "DESKTOP" CACHE STRING "Build target: DESKTOP, IOS, ANDROID")
+set_property(CACHE MUMOBILE_PLATFORM PROPERTY STRINGS DESKTOP IOS ANDROID)
+
+option(MUMOBILE_USE_VENDORED_SDL "Fetch SDL3 via FetchContent" ON)
+
+# ---------------------------------------------------------------------------
+# SDL3
+# ---------------------------------------------------------------------------
+if(MUMOBILE_USE_VENDORED_SDL)
+    include(FetchContent)
+    set(SDL_TEST OFF CACHE BOOL "" FORCE)
+    set(SDL_SHARED OFF CACHE BOOL "" FORCE)
+    set(SDL_STATIC ON CACHE BOOL "" FORCE)
+    FetchContent_Declare(
+        SDL3
+        GIT_REPOSITORY https://github.com/libsdl-org/SDL.git
+        GIT_TAG release-3.2.10
+        GIT_SHALLOW TRUE)
+    FetchContent_MakeAvailable(SDL3)
+else()
+    find_package(SDL3 CONFIG REQUIRED)
+endif()
+
+# ---------------------------------------------------------------------------
+# mumobile core library
+# ---------------------------------------------------------------------------
+add_library(mumobile_core STATIC
+    src/App.cpp
+    src/Platform/Log.cpp
+    src/Network/TcpClient.cpp
+    src/Scene/SceneManager.cpp
+    src/Scene/ServerListScene.cpp
+    src/Scene/WebzenScene.cpp
+    src/Scene/LogInScene.cpp
+    src/Scene/LoadingScene.cpp
+    src/Scene/CharacterScene.cpp
+    src/Scene/MainScene.cpp
+    src/Render/Renderer.cpp
+)
+
+target_include_directories(mumobile_core PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+
+target_link_libraries(mumobile_core PUBLIC SDL3::SDL3-static)
+
+# Default server, overridable at configure-time:
+#   -DMUMOBILE_SERVER_HOST=... -DMUMOBILE_SERVER_PORT=...
+set(MUMOBILE_SERVER_HOST "180.93.43.39" CACHE STRING "Default server host")
+set(MUMOBILE_SERVER_PORT "44405"       CACHE STRING "Default server port")
+target_compile_definitions(mumobile_core PUBLIC
+    MUMOBILE_DEFAULT_SERVER_HOST="${MUMOBILE_SERVER_HOST}"
+    MUMOBILE_DEFAULT_SERVER_PORT=${MUMOBILE_SERVER_PORT})
+
+if(MUMOBILE_PLATFORM STREQUAL "ANDROID")
+    target_compile_definitions(mumobile_core PUBLIC MUMOBILE_ANDROID=1)
+    # log + android system libs are provided by the NDK.
+    target_link_libraries(mumobile_core PUBLIC log android)
+elseif(MUMOBILE_PLATFORM STREQUAL "IOS")
+    target_compile_definitions(mumobile_core PUBLIC MUMOBILE_IOS=1)
+else()
+    target_compile_definitions(mumobile_core PUBLIC MUMOBILE_DESKTOP=1)
+endif()
+
+# ---------------------------------------------------------------------------
+# Executable
+# ---------------------------------------------------------------------------
+if(MUMOBILE_PLATFORM STREQUAL "ANDROID")
+    # The Android Gradle build builds a shared library named "main" that the
+    # SDLActivity Java side dlopens.
+    add_library(main SHARED src/Platform/AndroidMain.cpp)
+    target_link_libraries(main PRIVATE mumobile_core)
+elseif(MUMOBILE_PLATFORM STREQUAL "IOS")
+    add_executable(mumobile MACOSX_BUNDLE src/Platform/DesktopMain.cpp)
+    target_link_libraries(mumobile PRIVATE mumobile_core)
+    set_target_properties(mumobile PROPERTIES
+        MACOSX_BUNDLE_INFO_PLIST ${CMAKE_CURRENT_SOURCE_DIR}/platform/ios/Info.plist
+        MACOSX_BUNDLE_GUI_IDENTIFIER com.munique.mu
+        MACOSX_BUNDLE_BUNDLE_NAME "MU Mobile"
+        MACOSX_BUNDLE_BUNDLE_VERSION "0.1.0"
+        MACOSX_BUNDLE_SHORT_VERSION_STRING "0.1.0"
+        XCODE_ATTRIBUTE_TARGETED_DEVICE_FAMILY "1,2")
+else()
+    add_executable(mumobile src/Platform/DesktopMain.cpp)
+    target_link_libraries(mumobile PRIVATE mumobile_core)
+endif()
+
+message(STATUS "mumobile platform: ${MUMOBILE_PLATFORM}")
+message(STATUS "mumobile default server: ${MUMOBILE_SERVER_HOST}:${MUMOBILE_SERVER_PORT}")
