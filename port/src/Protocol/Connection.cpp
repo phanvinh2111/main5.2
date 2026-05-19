@@ -64,6 +64,13 @@ std::vector<std::vector<std::uint8_t>> Connection::poll_packets() {
         inbound_.insert(inbound_.end(), chunk.begin(), chunk.end());
     }
 
+    // NOTE: inbound is intentionally NOT symmetric with `send_packet`.
+    // The OpenMU Season 6 Ep 3 server-to-client direction uses ONLY
+    // SimpleModulus (see `Season6Episode3NetworkEncryptionFactoryPlugIn
+    // .CreateEncryptor(direction=ServerToClient)` -> `PipelinedEncryptor`
+    // which is `PipelinedSimpleModulusEncryptor` with no Xor32 wrapper).
+    // Applying `xor32_decrypt` here would break interop with a real
+    // OpenMU server.
     std::vector<std::uint8_t> one;
     while (try_extract_one_packet(one)) {
         if (is_encrypted_prefix(one[0])) {

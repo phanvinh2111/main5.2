@@ -377,6 +377,15 @@ std::vector<std::uint8_t> SimpleModulusDecryptor::decrypt(
         int bs = decrypt_block(in_block, out_block,
                                mod_, dec_, xor_, accept_wrong_checksum_);
         if (b == 0) {
+            // The first block must contain at least the counter byte.
+            // A malformed packet could yield `bs == 0`; without this
+            // guard the `bs - 1` arithmetic below would wrap to
+            // `SIZE_MAX` and corrupt memory inside `memcpy`.
+            if (bs < 1) {
+                throw std::runtime_error(
+                    "SimpleModulus: first block has size 0 "
+                    "(missing counter byte)");
+            }
             // Counter check: first block's first byte must equal the
             // expected counter value.
             if (out_block[0] != counter_) {

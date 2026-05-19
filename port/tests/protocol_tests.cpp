@@ -300,6 +300,43 @@ TEST(simple_modulus_decrypt_wrong_counter_throws) {
     assert_bytes_eq(p2, packet, "in-order decrypt #2");
 }
 
+TEST(simple_modulus_decrypt_zero_first_block_size_rejected) {
+    // Regression test for a buffer-overflow hardening fix.  A
+    // malformed cipher whose first block decodes to block_size == 0
+    // must be rejected at the decryptor; if it slipped through, the
+    // subsequent `memcpy(..., bs - 1)` would wrap to SIZE_MAX (a
+    // remotely triggerable heap overflow on attacker-controlled
+    // network input).
+    //
+    // We forge a malformed packet by encrypting a real block, then
+    // overwriting the block-size trailer (byte 9) so the decoded
+    // block_size becomes 0 while the checksum still matches.  We
+    // accept-wrong-checksum on the decryptor so the size check is
+    // exercised in isolation.
+    std::vector<std::uint8_t> packet = {0xC3, 0x06, 0x10, 0x20, 0x30, 0x40};
+    mu::proto::SimpleModulusEncryptor enc;
+    auto cipher = enc.encrypt(packet.data(), packet.size());
+
+    // header is 2 for C3, first block starts at offset 2 and occupies
+    // 11 bytes.  Bytes 9 and 10 of that block are the size trailer and
+    // checksum.  Flip the size byte so the decoded size becomes 0
+    // (size XOR sum XOR 0x3D == 0  =>  size = sum ^ 0x3D).
+    const std::uint8_t checksum = cipher[2 + 10];
+    cipher[2 + 9] = static_cast<std::uint8_t>(checksum ^ 0x3D);
+
+    mu::proto::SimpleModulusDecryptor dec(
+        mu::proto::keys::kSimpleModulusServerDecrypt.data());
+    dec.set_accept_wrong_checksum(true);  // isolate the size check
+
+    bool threw = false;
+    try {
+        dec.decrypt(cipher.data(), cipher.size());
+    } catch (const std::runtime_error&) {
+        threw = true;
+    }
+    if (!threw) fail("decrypt must reject first block with size 0");
+}
+
 // ---------------------------------------------------------------------
 // Combined Xor32 + SimpleModulus round-trip (full client send path)
 // ---------------------------------------------------------------------
