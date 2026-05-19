@@ -1,4 +1,4 @@
-name: port build (M1 smoke)
+name: port build (M1 + M2)
 
 on:
   push:
@@ -12,7 +12,7 @@ on:
 
 jobs:
   linux-desktop:
-    name: linux desktop smoke build
+    name: linux desktop smoke build + protocol tests
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -39,3 +39,9 @@ jobs:
 
       - name: ensure binary exists
         run: test -x port/build/mumobile
+
+      - name: build M2 protocol tests
+        run: cmake --build port/build --target mumobile_protocol_tests
+
+      - name: run M2 protocol tests (OpenMU codec parity)
+        run: ctest --test-dir port/build --output-on-failure
