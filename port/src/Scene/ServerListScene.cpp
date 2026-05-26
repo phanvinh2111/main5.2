@@ -47,6 +47,11 @@ void ServerListScene::on_event(App& app, const SDL_Event& ev) {
         cs->phase() ==
             proto::ConnectServerSession::Phase::ConnectionInfoReceived;
     if ((clicked || key_ok) && ready) {
+        // Hand off to the GameServer using the endpoint the ConnectServer
+        // resolved.  This tears down the Plain Connection and re-dials the
+        // TCP socket at the new host:port with Codec::GameServer.
+        app.start_game_server_dial(cs->game_server_host(),
+                                   cs->game_server_port());
         app.scenes().set_current(app, SceneId::LogIn);
     }
 }

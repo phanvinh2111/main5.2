@@ -24,6 +24,7 @@
 #include "Network/TcpClient.h"
 #include "Protocol/Connection.h"
 #include "Protocol/ConnectServerSession.h"
+#include "Protocol/GameServerSession.h"
 #include "Protocol/Framing.h"
 #include "Protocol/Keys.h"
 #include "Protocol/SimpleModulus.h"
@@ -583,6 +584,66 @@ TEST(connect_server_session_short_packet_marks_error) {
     s.on_packet(bogus, sizeof(bogus));
     if (s.phase() != mu::proto::ConnectServerSession::Phase::Error) {
         fail("short packet must transition to Error phase");
+    }
+}
+
+// ---------------------------------------------------------------------
+// GameServerSession: I/O-free state machine for the OpenMU
+// GameServer protocol.  The first server packet is a C1 F1 00
+// "GameServerEntered" frame containing result + playerId + version.
+// Test vector below is the live capture from 180.93.43.39:55901:
+//   c1 0c f1 00 01 02 00 31 30 34 30 34
+// ---------------------------------------------------------------------
+
+TEST(game_server_session_parses_entered_packet) {
+    const std::uint8_t pkt[] = {
+        0xC1, 0x0C, 0xF1, 0x00,
+        0x01,                         // result = 0x01 (success)
+        0x02, 0x00,                   // playerId = 0x0200 (BE) = 512
+        0x31, 0x30, 0x34, 0x30, 0x34  // version = "10404" ASCII
+    };
+    // Framing-length consistency: catches a class of bug at test time.
+    if (pkt[1] != sizeof(pkt)) {
+        fail("entered test packet has inconsistent framing length");
+    }
+
+    mu::proto::GameServerSession s;
+    if (s.phase() != mu::proto::GameServerSession::Phase::WaitingForEntered) {
+        fail("initial phase must be WaitingForEntered");
+    }
+    s.on_packet(pkt, sizeof(pkt));
+    if (s.phase() != mu::proto::GameServerSession::Phase::Entered) {
+        fail("phase after Entered packet must be Entered");
+    }
+    if (s.result() != 0x01) fail("result byte must be 0x01");
+    if (s.player_id() != 0x0200) fail("playerId must be 0x0200 (BE 02 00)");
+    if (s.version() != "10404") fail("version must be \"10404\"");
+}
+
+TEST(game_server_session_short_entered_payload_marks_error) {
+    // Truncated entered packet -- missing the 5-byte version string.
+    const std::uint8_t pkt[] = {
+        0xC1, 0x07, 0xF1, 0x00,
+        0x01, 0x02, 0x00
+    };
+    mu::proto::GameServerSession s;
+    s.on_packet(pkt, sizeof(pkt));
+    if (s.phase() != mu::proto::GameServerSession::Phase::Error) {
+        fail("short entered payload must transition to Error phase");
+    }
+}
+
+TEST(game_server_session_unknown_packet_is_not_fatal) {
+    // Unknown headcode -- session must stash it for diagnostics
+    // without flipping to Error.
+    const std::uint8_t pkt[] = {0xC1, 0x05, 0xAA, 0xBB, 0x00};
+    mu::proto::GameServerSession s;
+    s.on_packet(pkt, sizeof(pkt));
+    if (s.phase() == mu::proto::GameServerSession::Phase::Error) {
+        fail("unknown packet must not transition to Error");
+    }
+    if (s.last_unknown().empty()) {
+        fail("unknown packet must populate last_unknown()");
     }
 }
 
