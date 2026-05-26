@@ -512,6 +512,13 @@ TEST(connect_server_session_parses_server_list_response) {
         0x00, 0x01,            // count = 1
         0x00, 0x00, 0x00, 0x00 // entry: id=0, load=0%, reserved=0
     };
+    // C2 packet: bytes 1..2 are the BE length and must match buffer size.
+    // Catches the framing-length-mismatch class of bug at test time.
+    const std::size_t declared =
+        (static_cast<std::size_t>(pkt[1]) << 8) | pkt[2];
+    if (declared != sizeof(pkt)) {
+        fail("server list test packet has inconsistent framing length");
+    }
     mu::proto::ConnectServerSession s;
     s.on_packet(pkt, sizeof(pkt));
     if (s.phase() !=
@@ -535,15 +542,26 @@ TEST(connect_server_session_request_connection_info_format) {
     assert_bytes_eq(out[0], expected, "request connection info packet");
 }
 
-TEST(connect_server_session_parses_connection_info_response) {
-    // C1 len F4 03 <16-byte IP, null padded> <2-byte LE port>
-    std::vector<std::uint8_t> pkt = {0xC1, 0x18, 0xF4, 0x03};
-    const char* ip = "10.0.0.1";
-    std::size_t ip_len = std::strlen(ip);
-    for (std::size_t i = 0; i < ip_len; ++i) pkt.push_back(ip[i]);
+// Build a real-server-shaped ConnectionInfoResponse frame:
+//   C1 16 F4 03 <16-byte IP, null padded> <2-byte LE port>
+// total = 22 bytes (= 0x16).  Used by two tests below: one feeds the
+// frame directly to the state machine, the other pushes it through
+// Connection::poll_packets so a framing-length mismatch would stall
+// extraction.
+std::vector<std::uint8_t> make_connection_info_frame(
+    const std::string& ip, std::uint16_t port) {
+    std::vector<std::uint8_t> pkt = {0xC1, 0x16, 0xF4, 0x03};
+    for (char c : ip) pkt.push_back(static_cast<std::uint8_t>(c));
     while (pkt.size() < 4 + 16) pkt.push_back(0);
-    pkt.push_back(0x39); // port = 0x5039 = 20537, LE -> 39 50
-    pkt.push_back(0x50);
+    pkt.push_back(static_cast<std::uint8_t>(port & 0xFF));        // LE lo
+    pkt.push_back(static_cast<std::uint8_t>((port >> 8) & 0xFF)); // LE hi
+    return pkt;
+}
+
+TEST(connect_server_session_parses_connection_info_response) {
+    auto pkt = make_connection_info_frame("10.0.0.1", 20537);
+    if (pkt.size() != 22) fail("frame must be 22 bytes (matches C1 length field)");
+    if (pkt[1] != 0x16) fail("frame length byte must match real packet size");
 
     mu::proto::ConnectServerSession s;
     s.on_packet(pkt.data(), pkt.size());
