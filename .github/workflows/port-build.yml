@@ -1,0 +1,41 @@
+name: port build (M1 smoke)
+
+on:
+  push:
+    paths:
+      - 'port/**'
+      - '.github/workflows/port-build.yml'
+  pull_request:
+    paths:
+      - 'port/**'
+      - '.github/workflows/port-build.yml'
+
+jobs:
+  linux-desktop:
+    name: linux desktop smoke build
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install SDL3 build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake ninja-build pkg-config \
+            libx11-dev libxext-dev libxrandr-dev libxinerama-dev \
+            libxcursor-dev libxi-dev libxss-dev \
+            libwayland-dev libegl1-mesa-dev libgles2-mesa-dev \
+            libpulse-dev libasound2-dev libdbus-1-dev libudev-dev \
+            libibus-1.0-dev
+
+      - name: configure
+        run: |
+          cmake -S port -B port/build -G Ninja \
+            -DMUMOBILE_PLATFORM=DESKTOP \
+            -DCMAKE_BUILD_TYPE=Release
+
+      - name: build mumobile
+        run: cmake --build port/build --target mumobile
+
+      - name: ensure binary exists
+        run: test -x port/build/mumobile

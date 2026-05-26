@@ -1,0 +1,6 @@
+// Root Gradle build. The Android Gradle Plugin version is pinned to a
+// known-good combination with NDK r26 / CMake 3.22 / SDL3.
+
+plugins {
+    id 'com.android.application' version '8.4.0' apply false
+}

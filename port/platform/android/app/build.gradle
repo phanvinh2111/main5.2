@@ -1,0 +1,76 @@
+// Per-module build script. `externalNativeBuild` invokes the CMake project
+// at `port/CMakeLists.txt` — same code path as the iOS and desktop builds.
+
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.munique.mu'
+    compileSdk 34
+    ndkVersion '26.1.10909125'
+
+    defaultConfig {
+        applicationId 'com.munique.mu'
+        minSdk 26
+        targetSdk 34
+        versionCode 1
+        versionName '0.1.0'
+
+        externalNativeBuild {
+            cmake {
+                arguments '-DMUMOBILE_PLATFORM=ANDROID',
+                          '-DANDROID_STL=c++_shared',
+                          '-DSDL_SHARED=OFF',
+                          '-DSDL_STATIC=ON'
+                cppFlags '-std=c++17', '-fexceptions', '-frtti'
+            }
+        }
+
+        ndk {
+            // armeabi-v7a omitted by default — Play requires 64-bit anyway.
+            abiFilters 'arm64-v8a', 'x86_64'
+        }
+    }
+
+    buildTypes {
+        debug {
+            debuggable true
+            jniDebuggable true
+        }
+        release {
+            minifyEnabled false
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            // The native build root is `app/src/main/cpp/CMakeLists.txt`,
+            // which simply forwards to the shared port/ tree.
+            path 'src/main/cpp/CMakeLists.txt'
+            version '3.22.1'
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    sourceSets {
+        main {
+            // SDL3's pre-built `SDLActivity.java` lives in the SDL3 source
+            // tree and is added to the Java source set via the Gradle
+            // wiring SDL3 generates. M1 only ships the app subclass.
+            java.srcDirs = ['src/main/java']
+            manifest.srcFile 'src/main/AndroidManifest.xml'
+        }
+    }
+}
+
+dependencies {
+    // SDL3 ships its Android Java glue inside the source tree; the CMake
+    // build emits libSDL3.so / libmain.so and we pick up the Java glue via
+    // its AAR module published by SDL3 (added in M2 — for M1 the smoke
+    // build is the CMake target only).
+}

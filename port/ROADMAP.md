@@ -1,0 +1,135 @@
+# `main5.2` → iOS/Android SDL3 Port — Roadmap
+
+Full-port roadmap for replacing the Windows-only `Source Main 5.2/` client
+with a portable C++17 + SDL3 implementation that runs natively on iOS and
+Android. Each milestone is intended to ship as a stand-alone PR so the work
+remains reviewable and bisectable.
+
+Server target: `180.93.43.39:44405` (Season 6.15 OpenMU compatible).
+
+## Milestone summary
+
+| # | Milestone | Owns |
+|---|---|---|
+| **M1** | **Skeleton + scene state machine + TCP** | Project layout, CMake, SDL3 main callbacks, scene FSM, BSD-socket client. **(this PR)** |
+| M2 | Packet codec & protocol pump | Season 6.15 frame parser, protocol enums, async send/recv queues, dial server. Replaces the C# `ClientLibrary/` DLL with C++. |
+| M3 | Renderer foundation | SDL3 GPU wrapper, shader pipeline, 2D sprite/quad batcher, BMFont text. Replaces `glBegin/glEnd` paths in `ZzzOpenglUtil`. |
+| M4 | Texture loader (OZJ/OZB/OZT/JPG) | Port the JPEG-Turbo + custom OZJ/OZB decoders from `ZzzTexture.cpp` to SDL3 textures. |
+| M5 | Audio | SDL3 audio device + WAV/Ogg streamer replacing `DSplaysound.cpp` + `wzAudio.lib`. |
+| M6 | BMD model loader + animation | Port `ZzzBMD.cpp` (skeleton, bone animation, vertex blending) to a renderer-agnostic mesh class. |
+| M7 | Terrain & world rendering | Port `zzzLodTerrain.cpp`, `MapManager.cpp`, height map, water shader. |
+| M8 | Server List scene parity | Port `ServerList`/login pre-scene UI 1:1 from `LoginWin.cpp`. |
+| M9 | Login scene parity | Port `LogIn` scene UI + authentication packet exchange. |
+| M10 | Character select scene parity | Port `CharSelMainWin.cpp` + character preview rendering. |
+| M11 | Character creation scene | Port `CharMakeWin.cpp`. |
+| M12 | Loading scene + world transition | Port `LoadingScene.cpp` and inter-scene map handoff. |
+| M13 | Main scene — input + camera | Port `CameraMove.cpp`, mouse→touch input mapping, virtual joystick. |
+| M14 | Main scene — HUD & inventory | Port `NewUIMainFrameWindow.cpp`, inventory, vault, chat. |
+| M15 | Main scene — combat, skills, parties | Skill bar, target lock, party UI, guild UI. |
+| M16 | MU Helper + master skill tree | Port `MUHelper/` + master skill tree from `NewUIMasterLevel.cpp`. |
+| M17 | Code signing + store packaging | iOS provisioning profile, Android keystore, CI for IPA/AAB. Requires user credentials. |
+| M18 | QA pass + performance tuning | Profile-guided optimization, draw call reduction, asset packing. |
+
+## Detailed scope per milestone
+
+### M1 — Skeleton + scene state machine + TCP *(this PR)*
+
+* Add `port/` directory at repo root with CMake project.
+* Vendor SDL3 via `FetchContent` (release tag pinned).
+* Implement SDL3 main callbacks (`SDL_AppInit`/`SDL_AppEvent`/`SDL_AppIterate`/
+  `SDL_AppQuit`) so the same entry point works on Linux, iOS, and Android.
+* Scene state machine that mirrors `enum EGameScene` from
+  `Source Main 5.2/source/_define.h`.
+* Stub `IScene` for each of the 6 scenes — each renders its own name and the
+  current TCP connection state. No 3D.
+* Portable BSD-socket TCP client (POSIX `socket`/`connect`/`send`/`recv`)
+  with a non-blocking poll loop, hard-coded to dial `180.93.43.39:44405`.
+* iOS Xcode CMake target with `Info.plist` and `LaunchScreen.storyboard`.
+* Android Gradle/NDK project that links the same CMake target.
+* CI workflow that smoke-builds the Linux target.
+* Roadmap + README documents.
+
+### M2 — Packet codec & protocol pump
+
+* Port the MUnique.OpenMU packet definitions used by the Windows client into
+  C++ header structs (replaces the generated C# wrappers in `ClientLibrary/`).
+* Implement xor3 / SimpleModulus / SHA-256 framing exactly as the server
+  expects.
+* Background send/recv queues running on the SDL3 event thread.
+* Replace M1's stub hello with the real `ConnectServer` packet exchange.
+
+### M3 — Renderer foundation
+
+* SDL3 GPU API wrapper (`Render/GpuDevice`, `Render/Pipeline`,
+  `Render/Texture`).
+* SPIR-V shaders for: textured quad, masked text glyph, alpha-blended sprite.
+* Sprite batcher with 16k quad capacity.
+* BMFont text renderer using the original `Font0.bmd` glyph atlas.
+
+### M4 — Texture loader
+
+* Decoder for `.OZJ` (XOR'd JPEG), `.OZB` (XOR'd BMP), `.OZT` (XOR'd TGA),
+  matching the routines in `ZzzTexture.cpp`.
+* Streaming texture cache with LRU eviction on mobile (memory constrained).
+
+### M5 — Audio
+
+* SDL3 audio device + decoded `.WAV` playback via `SDL_LoadWAV_IO`.
+* OGG streaming for BGM using `stb_vorbis`.
+* Replaces `DSplaysound.cpp` and the `wzAudio.lib` static library.
+
+### M6 — BMD model loader + animation
+
+* Port `ZzzBMD.cpp` to a renderer-agnostic `Mesh` + `Skeleton` class.
+* Bone-blended skinning done in shader (no fixed-function transforms).
+* Smoke test: load `Player.bmd`, render in `CharacterScene`.
+
+### M7–M12 — Scene parity
+
+Each scene gets its own PR. For every scene, the deliverable is:
+
+1. Exact UI layout & widget tree taken from the corresponding
+   `Source Main 5.2/source/*.cpp` file.
+2. All input handlers ported.
+3. All packet flows that the scene triggers (login, char-select, etc.).
+4. Visual diff screenshots vs. the Windows client.
+
+### M13–M16 — In-game systems
+
+Same pattern — one PR per subsystem. M13 is the most touch-input-heavy
+since the original client assumes mouse + keyboard.
+
+### M17 — Code signing & store packaging
+
+* iOS: provisioning profile, capabilities, `xcodebuild archive` → IPA.
+* Android: release keystore, `bundle release` → AAB ready for Play Console.
+* CI: GitHub Actions workflow with macOS runner for iOS, Ubuntu for Android.
+* **Blocked on**: Apple Developer credentials, Android signing key from the
+  user. Until then, builds are unsigned debug.
+
+### M18 — QA pass
+
+* RenderDoc / Xcode GPU frame capture.
+* Reduce draw calls below 200/frame on iPhone 12.
+* APK size budget < 300 MB (extract `Data/` to OBB if needed).
+* Battery profiling.
+
+## Open questions
+
+* **Protocol fidelity**: server `180.93.43.39:44405` is assumed to be the
+  OpenMU Season 6.15 variant described in `README.md`. M2 will validate
+  this against a packet capture. If the server uses a non-standard protocol
+  (e.g. custom WebZen-derived), M2 spec will need to be revised.
+* **Asset distribution**: 737 MB of assets sit under `Source Main 5.2/bin/Data/`.
+  iOS IPAs over 200 MB require Wi-Fi to download from the App Store and
+  cannot exceed 4 GB. We will likely need an in-app downloader that pulls a
+  zipped asset bundle from a CDN on first launch (M4 deliverable).
+* **Touch UX**: MU's mouse-driven combat does not map cleanly to touch. M13
+  will need a UX pass with the user.
+* **Code signing**: M17 requires Apple Developer + Android signing keys from
+  the user.
+
+## Tracking
+
+Each milestone PR will reference back to this document and tick the
+relevant box.
