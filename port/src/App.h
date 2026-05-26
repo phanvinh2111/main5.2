@@ -62,8 +62,13 @@ public:
     // the given endpoint, and switch the codec stack to
     // `Codec::GameServer`.  Called by ServerListScene once we have a
     // resolved game-server endpoint.
-    void start_game_server_dial(const std::string& host,
-                                std::uint16_t port);
+    //
+    // `host` is taken by value on purpose: the caller will typically
+    // pass `connect_session_->game_server_host()`, which is a string
+    // *owned by* connect_session_ -- and this method destroys
+    // connect_session_ before storing the new endpoint, so a reference
+    // parameter would dangle the moment we hit `.reset()`.
+    void start_game_server_dial(std::string host, std::uint16_t port);
 
     const std::string& server_host() const { return server_host_; }
     unsigned short     server_port() const { return server_port_; }

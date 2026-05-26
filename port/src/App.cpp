@@ -162,12 +162,16 @@ void App::pump_network() {
     }
 }
 
-void App::start_game_server_dial(const std::string& host,
-                                 std::uint16_t port) {
+void App::start_game_server_dial(std::string host, std::uint16_t port) {
     if (stage_ == NetStage::GameServer) {
         log::warn("App: start_game_server_dial called twice, ignoring");
         return;
     }
+    // NOTE: host is taken by value because the typical caller passes
+    // `connect_session_->game_server_host()` -- a reference into the
+    // ConnectServerSession we are about to destroy below.  Copying it
+    // into the parameter at the call site keeps the bytes alive past
+    // `connect_session_.reset()`.
     log::info("App: switching ConnectServer -> GameServer dial %s:%u",
               host.c_str(), static_cast<unsigned>(port));
 
@@ -179,7 +183,7 @@ void App::start_game_server_dial(const std::string& host,
     connect_info_requested_ = false;
 
     tcp_.disconnect();
-    server_host_ = host;
+    server_host_ = std::move(host);
     server_port_ = port;
     tcp_.connect(server_host_, server_port_);
 
