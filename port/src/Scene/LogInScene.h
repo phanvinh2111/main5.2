@@ -12,6 +12,15 @@ public:
     void on_enter(App& app) override;
     void on_event(App& app, const SDL_Event& ev) override;
     void render(App& app, Renderer& r) override;
+
+private:
+    void submit_login(App& app);
+
+    // Latched on first submit so a long-held Enter / mashed key
+    // doesn't fire multiple LoginLongPasswordRequest packets.  Reset
+    // when the scene is re-entered (e.g. after Backspace -> server
+    // list -> Enter -> log in).
+    bool submitted_ = false;
 };
 
 }  // namespace mu

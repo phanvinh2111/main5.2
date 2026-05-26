@@ -647,6 +647,160 @@ TEST(game_server_session_unknown_packet_is_not_fatal) {
     }
 }
 
+// ---------------------------------------------------------------------
+// M2.7: GameServerSession login handshake.
+//
+// `start_login` queues a 60-byte C3 F1 01 LoginLongPasswordRequest with
+// the username & password Xor3-obfuscated and tick/version/serial in
+// their wire layout from `ClientToServerPackets.xml`.  Verify the
+// byte-for-byte output against the spec.
+// ---------------------------------------------------------------------
+
+TEST(game_server_session_start_login_before_entered_is_noop) {
+    mu::proto::GameServerSession s;
+    const std::uint8_t v[5]  = {'2', '0', '4', '0', '4'};
+    const std::uint8_t sn[16] = {'k','1','P','k','2','j','c','E',
+                                 'T','4','8','m','x','L','3','b'};
+    s.start_login("user", "pass", v, sn, 0);
+    auto out = s.take_outbound();
+    if (!out.empty()) {
+        fail("start_login before Entered must not queue any packet");
+    }
+}
+
+TEST(game_server_session_start_login_packet_layout) {
+    // Drive the session into Entered phase first.
+    const std::uint8_t entered_pkt[] = {
+        0xC1, 0x0C, 0xF1, 0x00,
+        0x01,                          // result
+        0x02, 0x00,                    // playerId
+        0x31, 0x30, 0x34, 0x30, 0x34   // "10404"
+    };
+    mu::proto::GameServerSession s;
+    s.on_packet(entered_pkt, sizeof(entered_pkt));
+    if (s.phase() != mu::proto::GameServerSession::Phase::Entered) {
+        fail("setup: failed to reach Entered phase");
+    }
+
+    const std::uint8_t v[5]   = {'2', '0', '4', '0', '4'};
+    const std::uint8_t sn[16] = {'k','1','P','k','2','j','c','E',
+                                 'T','4','8','m','x','L','3','b'};
+    s.start_login("caothu", "123qwe", v, sn, 0x11223344);
+
+    if (s.phase() != mu::proto::GameServerSession::Phase::LoggingIn) {
+        fail("phase must be LoggingIn after start_login");
+    }
+    auto out = s.take_outbound();
+    if (out.size() != 1) fail("must queue exactly one outbound packet");
+    const auto& p = out[0];
+    if (p.size() != 60) fail("LoginLongPasswordRequest must be 60 bytes");
+
+    // Framing + headcode
+    if (p[0] != 0xC3) fail("byte 0 must be C3 prefix");
+    if (p[1] != 0x3C) fail("byte 1 must be length 0x3C (60)");
+    if (p[2] != 0xF1) fail("byte 2 must be head 0xF1");
+    if (p[3] != 0x01) fail("byte 3 must be sub 0x01");
+
+    // Username/password are Xor3-obfuscated.  Verify by re-applying
+    // Xor3 (it's an involution) and checking the plaintext matches.
+    std::vector<std::uint8_t> uname(p.begin() + 4, p.begin() + 14);
+    mu::proto::xor3_apply(uname.data(), uname.size(),
+                          mu::proto::keys::kXor3.data());
+    const std::uint8_t expected_user[10] = {
+        'c','a','o','t','h','u', 0, 0, 0, 0 };
+    if (std::memcmp(uname.data(), expected_user, 10) != 0) {
+        fail("decrypted username must equal \"caothu\\0\\0\\0\\0\"");
+    }
+
+    std::vector<std::uint8_t> pwd(p.begin() + 14, p.begin() + 34);
+    mu::proto::xor3_apply(pwd.data(), pwd.size(),
+                          mu::proto::keys::kXor3.data());
+    const std::uint8_t expected_pwd[20] = {
+        '1','2','3','q','w','e',
+        0,0,0,0,0,0,0,0,0,0,0,0,0,0 };
+    if (std::memcmp(pwd.data(), expected_pwd, 20) != 0) {
+        fail("decrypted password must equal \"123qwe\" padded with NULs");
+    }
+
+    // Tick count -- big endian uint32.
+    if (p[34] != 0x11 || p[35] != 0x22 || p[36] != 0x33 || p[37] != 0x44) {
+        fail("tick count must be big-endian 0x11223344");
+    }
+    if (std::memcmp(p.data() + 38, v, 5) != 0) {
+        fail("client version must be \"20404\"");
+    }
+    if (std::memcmp(p.data() + 43, sn, 16) != 0) {
+        fail("client serial must be \"k1Pk2jcET48mxL3b\"");
+    }
+    if (p[59] != 0x00) fail("padding byte at offset 59 must be 0");
+}
+
+TEST(game_server_session_parses_login_ok_response) {
+    // Reach Entered then ship a login request so we are in LoggingIn.
+    mu::proto::GameServerSession s;
+    const std::uint8_t entered_pkt[] = {
+        0xC1, 0x0C, 0xF1, 0x00, 0x01, 0x02, 0x00,
+        0x31, 0x30, 0x34, 0x30, 0x34
+    };
+    s.on_packet(entered_pkt, sizeof(entered_pkt));
+    const std::uint8_t v[5]   = {'2','0','4','0','4'};
+    const std::uint8_t sn[16] = {'k','1','P','k','2','j','c','E',
+                                 'T','4','8','m','x','L','3','b'};
+    s.start_login("a", "b", v, sn, 0);
+    (void)s.take_outbound();
+
+    // Server response: C1 05 F1 01 01  (LoginResult.Okay)
+    const std::uint8_t ok_pkt[] = {0xC1, 0x05, 0xF1, 0x01, 0x01};
+    s.on_packet(ok_pkt, sizeof(ok_pkt));
+    if (s.phase() != mu::proto::GameServerSession::Phase::LoggedIn) {
+        fail("phase must be LoggedIn after Okay response");
+    }
+    if (s.login_result() !=
+        mu::proto::GameServerSession::LoginResult::Okay) {
+        fail("login_result must be Okay");
+    }
+}
+
+TEST(game_server_session_parses_login_invalid_password_response) {
+    mu::proto::GameServerSession s;
+    const std::uint8_t entered_pkt[] = {
+        0xC1, 0x0C, 0xF1, 0x00, 0x01, 0x02, 0x00,
+        0x31, 0x30, 0x34, 0x30, 0x34
+    };
+    s.on_packet(entered_pkt, sizeof(entered_pkt));
+
+    // Server response: C1 05 F1 01 00  (LoginResult.InvalidPassword)
+    const std::uint8_t bad_pkt[] = {0xC1, 0x05, 0xF1, 0x01, 0x00};
+    s.on_packet(bad_pkt, sizeof(bad_pkt));
+    if (s.phase() != mu::proto::GameServerSession::Phase::LoginFailed) {
+        fail("phase must be LoginFailed after InvalidPassword response");
+    }
+    if (s.login_result() !=
+        mu::proto::GameServerSession::LoginResult::InvalidPassword) {
+        fail("login_result must be InvalidPassword");
+    }
+}
+
+TEST(game_server_session_parses_login_wrong_version_response) {
+    mu::proto::GameServerSession s;
+    const std::uint8_t entered_pkt[] = {
+        0xC1, 0x0C, 0xF1, 0x00, 0x01, 0x02, 0x00,
+        0x31, 0x30, 0x34, 0x30, 0x34
+    };
+    s.on_packet(entered_pkt, sizeof(entered_pkt));
+
+    // Server response: C1 05 F1 01 06 (LoginResult.WrongVersion).
+    const std::uint8_t v_pkt[] = {0xC1, 0x05, 0xF1, 0x01, 0x06};
+    s.on_packet(v_pkt, sizeof(v_pkt));
+    if (s.phase() != mu::proto::GameServerSession::Phase::LoginFailed) {
+        fail("phase must be LoginFailed on WrongVersion");
+    }
+    if (s.login_result() !=
+        mu::proto::GameServerSession::LoginResult::WrongVersion) {
+        fail("login_result must be WrongVersion");
+    }
+}
+
 }  // namespace
 
 int main() {

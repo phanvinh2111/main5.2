@@ -58,6 +58,13 @@ public:
         return game_session_ ? &*game_session_ : nullptr;
     }
 
+    // Mutable handle used by LogInScene to queue the
+    // LoginLongPasswordRequest packet once the user submits the form.
+    // Returns nullptr until the GameServer session exists.
+    proto::GameServerSession* game_server_mut() {
+        return game_session_ ? &*game_session_ : nullptr;
+    }
+
     // Tear down the ConnectServer dialogue, re-dial the TCP socket at
     // the given endpoint, and switch the codec stack to
     // `Codec::GameServer`.  Called by ServerListScene once we have a

@@ -14,7 +14,8 @@ Server target: `180.93.43.39:44405` (Season 6.15 OpenMU compatible).
 | M1 | Skeleton + scene state machine + TCP | Project layout, CMake, SDL3 main callbacks, scene FSM, BSD-socket client. |
 | **M2** | **Packet codec (Xor3 / Xor32 / SimpleModulus + framing)** | C++ port of OpenMU's `Network/` codec — byte-exact with upstream C# reference vectors. **(this PR)** |
 | M2.5 | Protocol pump (ConnectServer) | Wire `mu::proto::Connection` (Codec::Plain) into the SceneManager, complete the ConnectServer dialogue against `180.93.43.39:44405`, surface the game-server endpoint on the SERVER_LIST scene. |
-| **M2.6** | **Game-server dial + GameServerEntered parse** | Tear down ConnectServer codec, re-dial TCP at the resolved endpoint, switch to Codec::GameServer, parse the `F1 00 GameServerEntered` packet, display version/playerId on LOG_IN. **(this PR)** |
+| M2.6 | Game-server dial + GameServerEntered parse | Tear down ConnectServer codec, re-dial TCP at the resolved endpoint, switch to Codec::GameServer, parse the `F1 00 GameServerEntered` packet, display version/playerId on LOG_IN. |
+| **M2.7** | **LoginLongPasswordRequest + LoginResponse (encrypted handshake)** | Build the 60-byte `C3 F1 01` LoginLongPasswordRequest, Xor3-obfuscate username & password, ship it through `Codec::GameServer` (Xor32+SimpleModulus), parse the server's `F1 01` LoginResponse. Closes the loop on the M2 codec stack against a live server. **(this PR)** |
 | M3 | Renderer foundation | SDL3 GPU wrapper, shader pipeline, 2D sprite/quad batcher, BMFont text. Replaces `glBegin/glEnd` paths in `ZzzOpenglUtil`. |
 | M4 | Texture loader (OZJ/OZB/OZT/JPG) | Port the JPEG-Turbo + custom OZJ/OZB decoders from `ZzzTexture.cpp` to SDL3 textures. |
 | M5 | Audio | SDL3 audio device + WAV/Ogg streamer replacing `DSplaysound.cpp` + `wzAudio.lib`. |
@@ -101,7 +102,7 @@ Server target: `180.93.43.39:44405` (Season 6.15 OpenMU compatible).
   (id=0, load=0%), requests the connection info, and displays the
   resolved endpoint `180.93.43.39:55901` on screen.
 
-### M2.6 — Game-server dial + GameServerEntered parse *(this PR)*
+### M2.6 — Game-server dial + GameServerEntered parse
 
 * Extend the App's network ownership so it can drive **two** protocol
   stages on the same `TcpClient` -- `NetStage::ConnectServer` (M2.5) and
@@ -125,6 +126,36 @@ Server target: `180.93.43.39:44405` (Season 6.15 OpenMU compatible).
   ConnectServer dialogue, transitions to `:55901`, receives the
   `F1 00` packet, and renders
   `Entered: result=0x01 playerId=512 version="10404"` on screen.
+
+### M2.7 — LoginLongPasswordRequest + LoginResponse *(this PR)*
+
+* Extend `mu::proto::GameServerSession` with two new phases
+  (`LoggingIn`, `LoggedIn` / `LoginFailed`) and a `start_login(account,
+  password, version, serial, tick)` method that builds the 60-byte
+  `C3 F1 01` LoginLongPasswordRequest packet byte-for-byte against
+  OpenMU's `ClientToServerPackets.xml` (username @ off 4 / 10 bytes
+  Xor3, password @ off 14 / 20 bytes Xor3, tick @ off 34 / u32 BE,
+  version @ off 38 / 5 ASCII, serial @ off 43 / 16 ASCII).
+* `LogInScene` reads `MU_ACCOUNT` / `MU_PASSWORD` (env vars on desktop,
+  `MU.account` / `MU.password` SDL hints on mobile), submits on Enter
+  once `GameServerSession::Phase::Entered` is reached, and renders the
+  resulting login result (`Okay` -> green LOGGED IN, anything else
+  -> red error string).
+* `App::pump_game_server` flows `GameServerSession::take_outbound()`
+  packets through `Connection(Codec::GameServer)`, which adds Xor32 +
+  SimpleModulus encryption on the way to the wire. The server's
+  `C1 05 F1 01 <result>` plaintext reply is parsed back into
+  `LoginResponse` on the inbound path.
+* Five new unit tests in `protocol_tests.cpp` (no-op before Entered,
+  60-byte layout incl. Xor3 plaintext round-trip, Okay parse, invalid-
+  password parse, wrong-version parse); 29 total now pass.
+* Verified live against `180.93.43.39:55901` with a real account:
+  client receives `Entered: result=0x01 playerId=512 version="10404"`,
+  ships the encrypted 60-byte login packet, and the server replies
+  `LoginResponse: 0x01 (ok)` -> scene renders `LOGGED IN` (see
+  `docs/m2.7-login-success.png`).  This proves the full M2 codec stack
+  (Xor3 / Xor32 / SimpleModulus + C3 framing) is wire-compatible with
+  the OpenMU server end-to-end.
 
 ### M3 — Renderer foundation
 
