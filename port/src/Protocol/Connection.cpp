@@ -9,7 +9,8 @@
 
 namespace mu::proto {
 
-Connection::Connection(mu::net::TcpClient& tcp) : tcp_(tcp) {}
+Connection::Connection(mu::net::TcpClient& tcp, Codec codec)
+    : tcp_(tcp), codec_(codec) {}
 
 bool Connection::send_packet(const std::uint8_t* data, std::size_t len) {
     if (len < 2) return false;
@@ -18,6 +19,11 @@ bool Connection::send_packet(const std::uint8_t* data, std::size_t len) {
     int declared = read_packet_size(data, len);
     if (declared <= 0 || static_cast<std::size_t>(declared) != len) {
         return false;
+    }
+
+    if (codec_ == Codec::Plain) {
+        // ConnectServer protocol — no crypto, ship the framed packet as-is.
+        return tcp_.send(data, len);
     }
 
     // Per OpenMU's Season6Episode3NetworkEncryptionFactoryPlugIn,
@@ -64,16 +70,17 @@ std::vector<std::vector<std::uint8_t>> Connection::poll_packets() {
         inbound_.insert(inbound_.end(), chunk.begin(), chunk.end());
     }
 
-    // NOTE: inbound is intentionally NOT symmetric with `send_packet`.
-    // The OpenMU Season 6 Ep 3 server-to-client direction uses ONLY
-    // SimpleModulus (see `Season6Episode3NetworkEncryptionFactoryPlugIn
+    // NOTE: in `Codec::GameServer` mode the inbound path is intentionally
+    // NOT symmetric with `send_packet`. The OpenMU Season 6 Ep 3
+    // server-to-client direction uses ONLY SimpleModulus (see
+    // `Season6Episode3NetworkEncryptionFactoryPlugIn
     // .CreateEncryptor(direction=ServerToClient)` -> `PipelinedEncryptor`
     // which is `PipelinedSimpleModulusEncryptor` with no Xor32 wrapper).
     // Applying `xor32_decrypt` here would break interop with a real
-    // OpenMU server.
+    // OpenMU server. `Codec::Plain` skips the SimpleModulus stage too.
     std::vector<std::uint8_t> one;
     while (try_extract_one_packet(one)) {
-        if (is_encrypted_prefix(one[0])) {
+        if (codec_ == Codec::GameServer && is_encrypted_prefix(one[0])) {
             one = dec_.decrypt(one.data(), one.size());
         }
         result.push_back(std::move(one));

@@ -23,6 +23,7 @@
 
 #include "Network/TcpClient.h"
 #include "Protocol/Connection.h"
+#include "Protocol/ConnectServerSession.h"
 #include "Protocol/Framing.h"
 #include "Protocol/Keys.h"
 #include "Protocol/SimpleModulus.h"
@@ -472,6 +473,117 @@ TEST(openmu_c3_decrypt_byte_exact) {
 
     assert_bytes_eq(intermediate, plain,
                     "OpenMU PipelinedDecryptorTests.C3DecryptAsync vector");
+}
+
+// ---------------------------------------------------------------------
+// ConnectServerSession: I/O-free state machine for the OpenMU
+// ConnectServer protocol.  Verified against a live capture of
+// 180.93.43.39:44405.
+// ---------------------------------------------------------------------
+
+TEST(connect_server_session_hello_triggers_server_list_request) {
+    mu::proto::ConnectServerSession s;
+    if (s.phase() != mu::proto::ConnectServerSession::Phase::WaitingForHello) {
+        fail("initial phase must be WaitingForHello");
+    }
+    const std::uint8_t hello[] = {0xC1, 0x04, 0x00, 0x01};
+    s.on_packet(hello, sizeof(hello));
+    if (s.phase() !=
+        mu::proto::ConnectServerSession::Phase::RequestedServerList) {
+        fail("phase after hello must be RequestedServerList");
+    }
+    auto out = s.take_outbound();
+    if (out.size() != 1) fail("must produce exactly one outbound packet");
+    const std::vector<std::uint8_t> expected = {0xC1, 0x04, 0xF4, 0x06};
+    assert_bytes_eq(out[0], expected, "request server list packet");
+}
+
+TEST(connect_server_session_parses_server_list_response) {
+    // Real bytes captured from 180.93.43.39:44405:
+    //   c2 00 0b f4 06 00 01 00 00 00 00
+    //   ^^ header                    ^^^  reserved (ignored)
+    //                            ^^^      load percent = 0
+    //                       ^^^^^^^      server id   = 0x0000 (BE)
+    //                 ^^^^^^^             server count = 1 (BE u16)
+    //              ^^ ^^                  F4 06 = ServerListResponse
+    //     ^^ ^^^^^^                       C2 packet, total length 11
+    const std::uint8_t pkt[] = {
+        0xC2, 0x00, 0x0B, 0xF4, 0x06,
+        0x00, 0x01,            // count = 1
+        0x00, 0x00, 0x00, 0x00 // entry: id=0, load=0%, reserved=0
+    };
+    // C2 packet: bytes 1..2 are the BE length and must match buffer size.
+    // Catches the framing-length-mismatch class of bug at test time.
+    const std::size_t declared =
+        (static_cast<std::size_t>(pkt[1]) << 8) | pkt[2];
+    if (declared != sizeof(pkt)) {
+        fail("server list test packet has inconsistent framing length");
+    }
+    mu::proto::ConnectServerSession s;
+    s.on_packet(pkt, sizeof(pkt));
+    if (s.phase() !=
+        mu::proto::ConnectServerSession::Phase::ServerListReceived) {
+        fail("phase after server list must be ServerListReceived");
+    }
+    const auto& list = s.server_list();
+    if (list.size() != 1) fail("server list must have 1 entry");
+    if (list[0].id != 0) fail("entry id must be 0");
+    if (list[0].load_percent != 0) fail("entry load must be 0%");
+}
+
+TEST(connect_server_session_request_connection_info_format) {
+    mu::proto::ConnectServerSession s;
+    s.request_connection_info(0x1234);
+    auto out = s.take_outbound();
+    if (out.size() != 1) fail("must produce exactly one outbound packet");
+    const std::vector<std::uint8_t> expected = {
+        0xC1, 0x06, 0xF4, 0x03, 0x12, 0x34
+    };
+    assert_bytes_eq(out[0], expected, "request connection info packet");
+}
+
+// Build a real-server-shaped ConnectionInfoResponse frame:
+//   C1 16 F4 03 <16-byte IP, null padded> <2-byte LE port>
+// total = 22 bytes (= 0x16).  Used by two tests below: one feeds the
+// frame directly to the state machine, the other pushes it through
+// Connection::poll_packets so a framing-length mismatch would stall
+// extraction.
+std::vector<std::uint8_t> make_connection_info_frame(
+    const std::string& ip, std::uint16_t port) {
+    std::vector<std::uint8_t> pkt = {0xC1, 0x16, 0xF4, 0x03};
+    for (char c : ip) pkt.push_back(static_cast<std::uint8_t>(c));
+    while (pkt.size() < 4 + 16) pkt.push_back(0);
+    pkt.push_back(static_cast<std::uint8_t>(port & 0xFF));        // LE lo
+    pkt.push_back(static_cast<std::uint8_t>((port >> 8) & 0xFF)); // LE hi
+    return pkt;
+}
+
+TEST(connect_server_session_parses_connection_info_response) {
+    auto pkt = make_connection_info_frame("10.0.0.1", 20537);
+    if (pkt.size() != 22) fail("frame must be 22 bytes (matches C1 length field)");
+    if (pkt[1] != 0x16) fail("frame length byte must match real packet size");
+
+    mu::proto::ConnectServerSession s;
+    s.on_packet(pkt.data(), pkt.size());
+    if (s.phase() !=
+        mu::proto::ConnectServerSession::Phase::ConnectionInfoReceived) {
+        fail("phase after connection info must be ConnectionInfoReceived");
+    }
+    if (s.game_server_host() != "10.0.0.1") {
+        fail("parsed host must be 10.0.0.1");
+    }
+    if (s.game_server_port() != 20537) {
+        fail("parsed port must be 20537");
+    }
+}
+
+TEST(connect_server_session_short_packet_marks_error) {
+    mu::proto::ConnectServerSession s;
+    const std::uint8_t bogus[] = {0xC1, 0x01};
+    s.on_packet(bogus, sizeof(bogus));
+    if (s.phase() != mu::proto::ConnectServerSession::Phase::Error) {
+        fail("short packet must transition to Error phase");
+    }
 }
 
 }  // namespace
