@@ -13,7 +13,7 @@ Server target: `180.93.43.39:44405` (Season 6.15 OpenMU compatible).
 |---|---|---|
 | M1 | Skeleton + scene state machine + TCP | Project layout, CMake, SDL3 main callbacks, scene FSM, BSD-socket client. |
 | **M2** | **Packet codec (Xor3 / Xor32 / SimpleModulus + framing)** | C++ port of OpenMU's `Network/` codec — byte-exact with upstream C# reference vectors. **(this PR)** |
-| M2.5 | Protocol pump | Wire `mu::proto::Connection` into the SceneManager, dispatch real server packets, hello / ConnectServer exchange. |
+| **M2.5** | **Protocol pump (ConnectServer)** | Wire `mu::proto::Connection` (Codec::Plain) into the SceneManager, complete the ConnectServer dialogue against `180.93.43.39:44405`, surface the game-server endpoint on the SERVER_LIST scene. **(this PR)** |
 | M3 | Renderer foundation | SDL3 GPU wrapper, shader pipeline, 2D sprite/quad batcher, BMFont text. Replaces `glBegin/glEnd` paths in `ZzzOpenglUtil`. |
 | M4 | Texture loader (OZJ/OZB/OZT/JPG) | Port the JPEG-Turbo + custom OZJ/OZB decoders from `ZzzTexture.cpp` to SDL3 textures. |
 | M5 | Audio | SDL3 audio device + WAV/Ogg streamer replacing `DSplaysound.cpp` + `wzAudio.lib`. |
@@ -50,7 +50,7 @@ Server target: `180.93.43.39:44405` (Season 6.15 OpenMU compatible).
 * CI workflow that smoke-builds the Linux target.
 * Roadmap + README documents.
 
-### M2 — Packet codec (this PR)
+### M2 — Packet codec
 
 * Ported MUnique/OpenMU's `src/Network` codec to portable C++17 under
   `port/src/Protocol/`:
@@ -73,12 +73,32 @@ Server target: `180.93.43.39:44405` (Season 6.15 OpenMU compatible).
   decode of OpenMU's `PipelinedDecryptorTests.C3DecryptAsync` cipher.
 * Linux CI now runs the test target on every PR (`ctest`).
 
-### M2.5 — Protocol pump
+### M2.5 — Protocol pump (ConnectServer) *(this PR)*
 
-* Wire `mu::proto::Connection` on top of the existing `TcpClient` from
-  the SDL3 event thread.
-* Replace M1's no-op socket connect with the real `GameServerHello`
-  exchange, then push packets into the `SceneManager`.
+* Add `Codec::Plain` mode to `mu::proto::Connection` so it can speak
+  the OpenMU ConnectServer protocol (no Xor32, no SimpleModulus) in
+  addition to the Season 6 game-server protocol from M2.
+* Add `mu::proto::ConnectServerSession`, an I/O-free state machine
+  that drives the ConnectServer dialogue:
+  1. Receive `C1 04 00 01` (hello) from the server.
+  2. Reply with `C1 04 F4 06` (RequestServerList).
+  3. Parse the `F4 06` response into a `vector<ConnectServerEntry>`.
+  4. Send `C1 06 F4 03 <id_be>` (RequestConnectionInfo) for the
+     first server.
+  5. Parse the `F4 03` response into `(game_server_host,
+     game_server_port)`.
+* Wire the session into `App::tick()` -- `pump_connect_server()`
+  shuttles bytes between the `Connection` and the session each frame.
+* Display ConnectServer state on the `ServerListScene`: phase, server
+  list (id + load%), and the parsed game-server endpoint once we have
+  it.  Tap/Enter only advances to `LOG_IN` after we have the endpoint.
+* Five new tests in `protocol_tests.cpp` covering the state machine
+  (hello -> request, server list parse, connection-info request
+  format, connection-info parse, short-packet rejection).
+* Verified end-to-end against `180.93.43.39:44405`: the binary
+  receives the hello, requests the server list, gets back 1 entry
+  (id=0, load=0%), requests the connection info, and displays the
+  resolved endpoint `180.93.43.39:55901` on screen.
 
 ### M3 — Renderer foundation
 

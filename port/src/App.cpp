@@ -3,6 +3,7 @@
 #include "Config.h"
 #include "Platform/Log.h"
 #include "Platform/PlatformBootstrap.h"
+#include "Protocol/Framing.h"
 #include "Scene/CharacterScene.h"
 #include "Scene/LoadingScene.h"
 #include "Scene/LogInScene.h"
@@ -111,6 +112,10 @@ bool App::init() {
 }
 
 void App::shutdown() {
+    // Tear down the codec layer BEFORE the TcpClient, since the
+    // Connection holds a reference back into tcp_.
+    connect_session_.reset();
+    connection_.reset();
     tcp_.disconnect();
     renderer_.shutdown();
     if (window_) {
@@ -132,6 +137,65 @@ void App::on_event(const SDL_Event& ev) {
     scenes_.on_event(*this, ev);
 }
 
+void App::pump_connect_server() {
+    if (tcp_.state() != net::TcpState::Connected) {
+        return;
+    }
+    // Lazy init on first reach of `Connected`.  The port 44405 endpoint
+    // is OpenMU's ConnectServer, which speaks Plain (no encryption).
+    // M2.5 stops at the ConnectServer dialogue; the subsequent
+    // GameServer dial will switch to a separate Codec::GameServer
+    // Connection in a follow-up milestone.
+    if (!connection_) {
+        connection_.emplace(tcp_, proto::Connection::Codec::Plain);
+        connect_session_.emplace();
+        log::info("App: ConnectServer session opened against %s:%u",
+                  server_host_.c_str(),
+                  static_cast<unsigned>(server_port_));
+    }
+
+    auto log_packet = [](const char* dir, const std::vector<std::uint8_t>& p) {
+        if (p.empty()) return;
+        const int hdr = proto::header_size_for_prefix(p[0]);
+        const std::uint8_t head = (hdr > 0 && p.size() > std::size_t(hdr)) ?
+                                  p[hdr] : 0;
+        const std::uint8_t sub  = (hdr > 0 && p.size() > std::size_t(hdr + 1)) ?
+                                  p[hdr + 1] : 0;
+        log::info("App: %s %zu byte packet, head=0x%02X sub=0x%02X",
+                  dir, p.size(),
+                  static_cast<unsigned>(head),
+                  static_cast<unsigned>(sub));
+    };
+
+    try {
+        auto packets = connection_->poll_packets();
+        for (const auto& pkt : packets) {
+            log_packet("<<-", pkt);
+            connect_session_->on_packet(pkt.data(), pkt.size());
+        }
+    } catch (const std::exception& e) {
+        log::error("App: codec error: %s", e.what());
+    }
+
+    // After we know the server list, ask for connection info on the
+    // first entry exactly once.
+    if (!connect_info_requested_ &&
+        connect_session_->phase() ==
+            proto::ConnectServerSession::Phase::ServerListReceived &&
+        !connect_session_->server_list().empty()) {
+        connect_session_->request_connection_info(
+            connect_session_->server_list().front().id);
+        connect_info_requested_ = true;
+    }
+
+    for (const auto& pkt : connect_session_->take_outbound()) {
+        log_packet("->>", pkt);
+        if (!connection_->send_packet(pkt.data(), pkt.size())) {
+            log::error("App: failed to ship outbound packet");
+        }
+    }
+}
+
 bool App::tick() {
     if (quit_) return false;
 
@@ -139,6 +203,7 @@ bool App::tick() {
     const float  dt     = static_cast<float>((now_ms - last_ms_) / 1000.0);
     last_ms_            = now_ms;
 
+    pump_connect_server();
     scenes_.update(*this, dt);
 
     renderer_.begin_frame();

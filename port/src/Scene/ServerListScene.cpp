@@ -9,8 +9,25 @@
 
 namespace mu {
 
+namespace {
+
+const char* phase_label(proto::ConnectServerSession::Phase p) {
+    using P = proto::ConnectServerSession::Phase;
+    switch (p) {
+        case P::WaitingForHello:          return "waiting for hello";
+        case P::RequestedServerList:      return "requested server list";
+        case P::ServerListReceived:       return "server list received";
+        case P::RequestedConnectionInfo:  return "requested connection info";
+        case P::ConnectionInfoReceived:   return "connection info received";
+        case P::Error:                    return "error";
+    }
+    return "?";
+}
+
+}  // namespace
+
 void ServerListScene::on_enter(App& app) {
-    log::info("ServerListScene::on_enter — server target %s:%u",
+    log::info("ServerListScene::on_enter -- server target %s:%u",
               app.server_host().c_str(),
               static_cast<unsigned>(app.server_port()));
 }
@@ -21,8 +38,15 @@ void ServerListScene::on_event(App& app, const SDL_Event& ev) {
     const bool key_ok  = (ev.type == SDL_EVENT_KEY_DOWN) &&
                          (ev.key.key == SDLK_RETURN ||
                           ev.key.key == SDLK_SPACE);
-    if ((clicked || key_ok) &&
-        app.tcp().state() == net::TcpState::Connected) {
+    // We require the ConnectServer to have actually told us a game
+    // server endpoint before letting the player advance.  That's the
+    // M2.5 promotion criterion -- M1's pure-TCP-reachable was too lax.
+    const auto* cs = app.connect_server();
+    const bool ready =
+        cs &&
+        cs->phase() ==
+            proto::ConnectServerSession::Phase::ConnectionInfoReceived;
+    if ((clicked || key_ok) && ready) {
         app.scenes().set_current(app, SceneId::LogIn);
     }
 }
@@ -32,9 +56,9 @@ void ServerListScene::update(App& /*app*/, float /*dt*/) {}
 void ServerListScene::render(App& app, Renderer& r) {
     r.set_clear_color(8, 12, 28, 255);
 
-    char title[128];
+    char title[160];
     std::snprintf(title, sizeof(title),
-                  "[M1] Scene 0 — SERVER_LIST   target %s:%u",
+                  "[M2.5] Scene 0 -- SERVER_LIST   target %s:%u",
                   app.server_host().c_str(),
                   static_cast<unsigned>(app.server_port()));
     r.draw_text(16, 16, title, 240, 220, 120);
@@ -47,10 +71,56 @@ void ServerListScene::render(App& app, Renderer& r) {
     if (app.tcp().state() == net::TcpState::Failed) {
         r.draw_text(16, 64, "error: " + app.tcp().last_error(),
                     255, 80, 80);
-    } else if (app.tcp().state() == net::TcpState::Connected) {
-        r.draw_text(16, 64,
-                    "Tap / Enter to advance to LOG_IN scene",
+        return;
+    }
+
+    const auto* cs = app.connect_server();
+    if (!cs) {
+        r.draw_text(16, 64, "ConnectServer: (waiting for TCP)",
+                    180, 180, 220);
+        return;
+    }
+
+    char phase_line[128];
+    std::snprintf(phase_line, sizeof(phase_line),
+                  "ConnectServer phase: %s",
+                  phase_label(cs->phase()));
+    r.draw_text(16, 64, phase_line, 180, 220, 255);
+
+    int y = 92;
+    const auto& list = cs->server_list();
+    if (!list.empty()) {
+        char header[64];
+        std::snprintf(header, sizeof(header),
+                      "Servers (%zu):", list.size());
+        r.draw_text(16, y, header, 200, 200, 200);
+        y += 20;
+        for (const auto& e : list) {
+            char line[80];
+            std::snprintf(line, sizeof(line),
+                          "  id=%u  load=%u%%",
+                          static_cast<unsigned>(e.id),
+                          static_cast<unsigned>(e.load_percent));
+            r.draw_text(32, y, line);
+            y += 18;
+        }
+    }
+
+    if (cs->phase() ==
+        proto::ConnectServerSession::Phase::ConnectionInfoReceived) {
+        char gs[128];
+        std::snprintf(gs, sizeof(gs),
+                      "Game server endpoint: %s:%u",
+                      cs->game_server_host().c_str(),
+                      static_cast<unsigned>(cs->game_server_port()));
+        r.draw_text(16, y, gs, 160, 240, 160);
+        y += 22;
+        r.draw_text(16, y, "Tap / Enter to advance to LOG_IN scene",
                     160, 240, 160);
+    } else if (cs->phase() ==
+               proto::ConnectServerSession::Phase::Error) {
+        r.draw_text(16, y, "ConnectServer error: " + cs->last_error(),
+                    255, 80, 80);
     }
 
     r.draw_text(16, r.height() - 24,

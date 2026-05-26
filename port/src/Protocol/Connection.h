@@ -3,14 +3,18 @@
 // MU Online network "connection" — composes the codec stack on top of
 // a portable TcpClient.
 //
-// Outgoing (client → server) per OpenMU server convention:
+// Two codec modes are supported:
 //
-//   raw bytes → SimpleModulus.encrypt (C3/C4 only) → Xor32 → TCP send
+//   * Codec::GameServer  — the Season 6 Episode 3 game-server protocol.
+//     Outbound: Xor32 → SimpleModulus.encrypt (C3/C4 only) → TCP send.
+//     Inbound:  TCP recv → framing → SimpleModulus.decrypt (C3/C4 only).
+//     Matches `MUnique.OpenMU.Network.PlugIns
+//     .Season6Episode3NetworkEncryptionFactoryPlugIn`.
 //
-// Incoming (server → client):
-//
-//   TCP recv → reassemble into framed packets → SimpleModulus.decrypt
-//   (C3/C4 only) → deliver
+//   * Codec::Plain       — the ConnectServer protocol (port 44405 on the
+//     reference server).  No encryption layer; packets travel verbatim.
+//     OpenMU's ConnectServer ships with the `PlainNetworkEncryption`
+//     factory which is exactly this.
 //
 // Xor3 obfuscation of credential / sensitive sub-fields is applied
 // per-packet by the caller before queuing the packet, because the
@@ -29,7 +33,13 @@ namespace mu::proto {
 
 class Connection {
 public:
-    explicit Connection(mu::net::TcpClient& tcp);
+    enum class Codec {
+        Plain,       // ConnectServer protocol — no crypto.
+        GameServer,  // Season 6 Episode 3 game protocol — Xor32 + SimpleModulus.
+    };
+
+    explicit Connection(mu::net::TcpClient& tcp,
+                        Codec codec = Codec::GameServer);
 
     // Encode + queue a complete framed packet for transmission.
     // Returns false if the packet looks malformed (unknown prefix,
@@ -54,6 +64,7 @@ private:
     bool try_extract_one_packet(std::vector<std::uint8_t>& out);
 
     mu::net::TcpClient& tcp_;
+    Codec codec_;
     SimpleModulusEncryptor enc_;
     SimpleModulusDecryptor dec_;
 

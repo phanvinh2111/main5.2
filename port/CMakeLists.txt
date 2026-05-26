@@ -42,6 +42,7 @@ set(MUMOBILE_CORE_SOURCES
     src/Protocol/Xor.cpp
     src/Protocol/SimpleModulus.cpp
     src/Protocol/Connection.cpp
+    src/Protocol/ConnectServerSession.cpp
     src/Scene/SceneManager.cpp
     src/Scene/ServerListScene.cpp
     src/Scene/WebzenScene.cpp

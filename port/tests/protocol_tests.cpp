@@ -23,6 +23,7 @@
 
 #include "Network/TcpClient.h"
 #include "Protocol/Connection.h"
+#include "Protocol/ConnectServerSession.h"
 #include "Protocol/Framing.h"
 #include "Protocol/Keys.h"
 #include "Protocol/SimpleModulus.h"
@@ -472,6 +473,99 @@ TEST(openmu_c3_decrypt_byte_exact) {
 
     assert_bytes_eq(intermediate, plain,
                     "OpenMU PipelinedDecryptorTests.C3DecryptAsync vector");
+}
+
+// ---------------------------------------------------------------------
+// ConnectServerSession: I/O-free state machine for the OpenMU
+// ConnectServer protocol.  Verified against a live capture of
+// 180.93.43.39:44405.
+// ---------------------------------------------------------------------
+
+TEST(connect_server_session_hello_triggers_server_list_request) {
+    mu::proto::ConnectServerSession s;
+    if (s.phase() != mu::proto::ConnectServerSession::Phase::WaitingForHello) {
+        fail("initial phase must be WaitingForHello");
+    }
+    const std::uint8_t hello[] = {0xC1, 0x04, 0x00, 0x01};
+    s.on_packet(hello, sizeof(hello));
+    if (s.phase() !=
+        mu::proto::ConnectServerSession::Phase::RequestedServerList) {
+        fail("phase after hello must be RequestedServerList");
+    }
+    auto out = s.take_outbound();
+    if (out.size() != 1) fail("must produce exactly one outbound packet");
+    const std::vector<std::uint8_t> expected = {0xC1, 0x04, 0xF4, 0x06};
+    assert_bytes_eq(out[0], expected, "request server list packet");
+}
+
+TEST(connect_server_session_parses_server_list_response) {
+    // Real bytes captured from 180.93.43.39:44405:
+    //   c2 00 0b f4 06 00 01 00 00 00 00
+    //   ^^ header                    ^^^  reserved (ignored)
+    //                            ^^^      load percent = 0
+    //                       ^^^^^^^      server id   = 0x0000 (BE)
+    //                 ^^^^^^^             server count = 1 (BE u16)
+    //              ^^ ^^                  F4 06 = ServerListResponse
+    //     ^^ ^^^^^^                       C2 packet, total length 11
+    const std::uint8_t pkt[] = {
+        0xC2, 0x00, 0x0B, 0xF4, 0x06,
+        0x00, 0x01,            // count = 1
+        0x00, 0x00, 0x00, 0x00 // entry: id=0, load=0%, reserved=0
+    };
+    mu::proto::ConnectServerSession s;
+    s.on_packet(pkt, sizeof(pkt));
+    if (s.phase() !=
+        mu::proto::ConnectServerSession::Phase::ServerListReceived) {
+        fail("phase after server list must be ServerListReceived");
+    }
+    const auto& list = s.server_list();
+    if (list.size() != 1) fail("server list must have 1 entry");
+    if (list[0].id != 0) fail("entry id must be 0");
+    if (list[0].load_percent != 0) fail("entry load must be 0%");
+}
+
+TEST(connect_server_session_request_connection_info_format) {
+    mu::proto::ConnectServerSession s;
+    s.request_connection_info(0x1234);
+    auto out = s.take_outbound();
+    if (out.size() != 1) fail("must produce exactly one outbound packet");
+    const std::vector<std::uint8_t> expected = {
+        0xC1, 0x06, 0xF4, 0x03, 0x12, 0x34
+    };
+    assert_bytes_eq(out[0], expected, "request connection info packet");
+}
+
+TEST(connect_server_session_parses_connection_info_response) {
+    // C1 len F4 03 <16-byte IP, null padded> <2-byte LE port>
+    std::vector<std::uint8_t> pkt = {0xC1, 0x18, 0xF4, 0x03};
+    const char* ip = "10.0.0.1";
+    std::size_t ip_len = std::strlen(ip);
+    for (std::size_t i = 0; i < ip_len; ++i) pkt.push_back(ip[i]);
+    while (pkt.size() < 4 + 16) pkt.push_back(0);
+    pkt.push_back(0x39); // port = 0x5039 = 20537, LE -> 39 50
+    pkt.push_back(0x50);
+
+    mu::proto::ConnectServerSession s;
+    s.on_packet(pkt.data(), pkt.size());
+    if (s.phase() !=
+        mu::proto::ConnectServerSession::Phase::ConnectionInfoReceived) {
+        fail("phase after connection info must be ConnectionInfoReceived");
+    }
+    if (s.game_server_host() != "10.0.0.1") {
+        fail("parsed host must be 10.0.0.1");
+    }
+    if (s.game_server_port() != 20537) {
+        fail("parsed port must be 20537");
+    }
+}
+
+TEST(connect_server_session_short_packet_marks_error) {
+    mu::proto::ConnectServerSession s;
+    const std::uint8_t bogus[] = {0xC1, 0x01};
+    s.on_packet(bogus, sizeof(bogus));
+    if (s.phase() != mu::proto::ConnectServerSession::Phase::Error) {
+        fail("short packet must transition to Error phase");
+    }
 }
 
 }  // namespace
