@@ -16,6 +16,57 @@ constexpr std::uint8_t kHeadGameServerEntered = 0xF1;
 constexpr std::uint8_t kSubGameServerEntered  = 0x00;
 constexpr std::uint8_t kHeadLogin             = 0xF1;
 constexpr std::uint8_t kSubLogin              = 0x01;
+constexpr std::uint8_t kHeadCharacterList     = 0xF3;
+constexpr std::uint8_t kSubCharacterList      = 0x00;
+
+// RequestCharacterList wire layout (OpenMU
+// `ClientToServer/ClientToServerPackets.xml`):
+//
+//   index | length | field
+//   ------+--------+--------------------------------
+//       0 |   1    | 0xC1 framing prefix
+//       1 |   1    | length byte (0x05)
+//       2 |   1    | head 0xF3
+//       3 |   1    | sub  0x00
+//       4 |   1    | language (echoed by server)
+//
+// Total = 5 bytes, plaintext (C1).
+constexpr std::size_t kCharListReqLen      = 5;
+constexpr std::size_t kCharListReqLangOff  = 4;
+
+// CharacterList wire layout after the C1 header is stripped (the body
+// passed to `parse_character_list`):
+//
+//   offset | length    | field
+//   -------+-----------+----------------------------
+//        0 |     1     | UnlockFlags
+//        1 |     1     | MoveCnt
+//        2 |     1     | CharacterCount (N)
+//        3 |     1     | IsVaultExtended (0/1)
+//        4 | N * S     | CharacterData entries
+//
+// S is either 34 (Classic / pre-Season-6) or 44 (Extended / Season 6+).
+// Inside each CharacterData entry (matches OpenMU `CharacterData`):
+//
+//   inner | length | field
+//   ------+--------+----------------------------
+//      0  |   1    | SlotIndex
+//      1  |  10    | Name (ASCII, null-padded)
+//     11  |   1    | reserved (always 0 in OpenMU)
+//     12  |   2    | Level (ushort little-endian)
+//     14  |   1    | low nibble = Status, high nibble = IsItemBlockActive
+//     15  | 18/27  | Appearance binary
+//     33/42|   1   | GuildPosition
+constexpr std::size_t kCharListHeaderLen   = 4;
+constexpr std::size_t kCharEntryClassicLen  = 34;
+constexpr std::size_t kCharEntryExtendedLen = 44;
+constexpr std::size_t kCharEntryNameOff     = 1;
+constexpr std::size_t kCharEntryNameLen     = 10;
+constexpr std::size_t kCharEntryLevelOff    = 12;
+constexpr std::size_t kCharEntryStatusOff   = 14;
+constexpr std::size_t kCharEntryAppearanceOff = 15;
+constexpr std::size_t kCharEntryAppearanceClassic  = 18;
+constexpr std::size_t kCharEntryAppearanceExtended = 27;
 
 // LoginLongPasswordRequest exact byte layout from OpenMU's
 // `src/Network/Packets/ClientToServer/ClientToServerPackets.xml`:
@@ -56,6 +107,19 @@ void write_u32_be(std::uint8_t* p, std::uint32_t v) noexcept {
     p[1] = static_cast<std::uint8_t>((v >> 16) & 0xFF);
     p[2] = static_cast<std::uint8_t>((v >>  8) & 0xFF);
     p[3] = static_cast<std::uint8_t>((v >>  0) & 0xFF);
+}
+
+std::uint16_t read_u16_le(const std::uint8_t* p) noexcept {
+    return static_cast<std::uint16_t>(
+        p[0] | (static_cast<std::uint16_t>(p[1]) << 8));
+}
+
+// Extract a null-terminated ASCII string from a fixed-length field.
+// Trims trailing NULs and stops at the first one within the slice.
+std::string read_fixed_ascii(const std::uint8_t* p, std::size_t len) {
+    std::size_t n = 0;
+    while (n < len && p[n] != 0) ++n;
+    return std::string(reinterpret_cast<const char*>(p), n);
 }
 
 int headcode_offset(std::uint8_t prefix) noexcept {
@@ -103,6 +167,10 @@ void GameServerSession::on_packet(const std::uint8_t* data, std::size_t len) {
     }
     if (head == kHeadLogin && sub == kSubLogin) {
         parse_login_response(data + hc_off + 2, len - (hc_off + 2));
+        return;
+    }
+    if (head == kHeadCharacterList && sub == kSubCharacterList) {
+        parse_character_list(data + hc_off + 2, len - (hc_off + 2));
         return;
     }
 
@@ -175,6 +243,20 @@ void GameServerSession::parse_entered(const std::uint8_t* body,
     phase_ = Phase::Entered;
 }
 
+void GameServerSession::start_character_list_request(std::uint8_t language) {
+    if (phase_ != Phase::LoggedIn) {
+        return;
+    }
+    std::vector<std::uint8_t> pkt(kCharListReqLen, 0);
+    pkt[0] = kPrefixC1;
+    pkt[1] = static_cast<std::uint8_t>(kCharListReqLen);
+    pkt[2] = kHeadCharacterList;
+    pkt[3] = kSubCharacterList;
+    pkt[kCharListReqLangOff] = language;
+    outbound_.push_back(std::move(pkt));
+    phase_ = Phase::CharacterListRequested;
+}
+
 void GameServerSession::parse_login_response(const std::uint8_t* body,
                                              std::size_t len) {
     if (len < 1) {
@@ -197,6 +279,76 @@ void GameServerSession::parse_login_response(const std::uint8_t* body,
     }
     phase_ = (login_result_ == LoginResult::Okay) ? Phase::LoggedIn
                                                   : Phase::LoginFailed;
+}
+
+void GameServerSession::parse_character_list(const std::uint8_t* body,
+                                             std::size_t len) {
+    if (len < kCharListHeaderLen) {
+        fail("CharacterList: payload too short for header");
+        return;
+    }
+    const std::uint8_t unlock_flags    = body[0];
+    const std::uint8_t move_count      = body[1];
+    const std::uint8_t character_count = body[2];
+    const bool         vault_extended  = (body[3] != 0);
+
+    const std::size_t entries_bytes = len - kCharListHeaderLen;
+    CharacterListVariant variant = CharacterListVariant::Unknown;
+    std::size_t entry_size = 0;
+    if (character_count == 0) {
+        // Empty list -- nothing to disambiguate; mark Classic by
+        // convention so callers can switch on it without surprise.
+        variant    = CharacterListVariant::Classic;
+        entry_size = kCharEntryClassicLen;
+    } else if (entries_bytes ==
+               character_count * kCharEntryClassicLen) {
+        variant    = CharacterListVariant::Classic;
+        entry_size = kCharEntryClassicLen;
+    } else if (entries_bytes ==
+               character_count * kCharEntryExtendedLen) {
+        variant    = CharacterListVariant::Extended;
+        entry_size = kCharEntryExtendedLen;
+    } else {
+        char buf[96];
+        std::snprintf(buf, sizeof(buf),
+                      "CharacterList: %zu entry bytes does not match "
+                      "%u * (34 or 44)",
+                      entries_bytes,
+                      static_cast<unsigned>(character_count));
+        fail(buf);
+        return;
+    }
+
+    std::vector<CharacterEntry> chars;
+    chars.reserve(character_count);
+    const std::size_t appearance_len =
+        (variant == CharacterListVariant::Extended)
+            ? kCharEntryAppearanceExtended
+            : kCharEntryAppearanceClassic;
+
+    for (std::size_t i = 0; i < character_count; ++i) {
+        const std::uint8_t* e = body + kCharListHeaderLen + i * entry_size;
+        CharacterEntry ce;
+        ce.slot_index = e[0];
+        ce.name = read_fixed_ascii(e + kCharEntryNameOff,
+                                   kCharEntryNameLen);
+        ce.level  = read_u16_le(e + kCharEntryLevelOff);
+        const std::uint8_t status_byte = e[kCharEntryStatusOff];
+        ce.status            = static_cast<std::uint8_t>(status_byte & 0x0F);
+        ce.item_block_active = (status_byte & 0xF0) != 0;
+        ce.appearance.assign(e + kCharEntryAppearanceOff,
+                             e + kCharEntryAppearanceOff + appearance_len);
+        ce.guild_position =
+            e[kCharEntryAppearanceOff + appearance_len];
+        chars.push_back(std::move(ce));
+    }
+
+    unlock_flags_      = unlock_flags;
+    move_count_        = move_count;
+    is_vault_extended_ = vault_extended;
+    character_list_variant_ = variant;
+    characters_ = std::move(chars);
+    phase_ = Phase::CharacterListReceived;
 }
 
 void GameServerSession::fail(std::string msg) {

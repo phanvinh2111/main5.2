@@ -15,7 +15,8 @@ Server target: `180.93.43.39:44405` (Season 6.15 OpenMU compatible).
 | **M2** | **Packet codec (Xor3 / Xor32 / SimpleModulus + framing)** | C++ port of OpenMU's `Network/` codec — byte-exact with upstream C# reference vectors. **(this PR)** |
 | M2.5 | Protocol pump (ConnectServer) | Wire `mu::proto::Connection` (Codec::Plain) into the SceneManager, complete the ConnectServer dialogue against `180.93.43.39:44405`, surface the game-server endpoint on the SERVER_LIST scene. |
 | M2.6 | Game-server dial + GameServerEntered parse | Tear down ConnectServer codec, re-dial TCP at the resolved endpoint, switch to Codec::GameServer, parse the `F1 00 GameServerEntered` packet, display version/playerId on LOG_IN. |
-| **M2.7** | **LoginLongPasswordRequest + LoginResponse (encrypted handshake)** | Build the 60-byte `C3 F1 01` LoginLongPasswordRequest, Xor3-obfuscate username & password, ship it through `Codec::GameServer` (Xor32+SimpleModulus), parse the server's `F1 01` LoginResponse. Closes the loop on the M2 codec stack against a live server. **(this PR)** |
+| M2.7 | LoginLongPasswordRequest + LoginResponse (encrypted handshake) | Build the 60-byte `C3 F1 01` LoginLongPasswordRequest, Xor3-obfuscate username & password, ship it through `Codec::GameServer` (Xor32+SimpleModulus), parse the server's `F1 01` LoginResponse. Closes the loop on the M2 codec stack against a live server. |
+| **M2.8** | **RequestCharacterList + CharacterList parse** | Right after `LoginResult::Okay`, send the 5-byte `C1 05 F3 00 lang` RequestCharacterList. Parse the server's variable-length `F3 00 CharacterList` reply (auto-detect classic 34B vs extended 44B per-character layouts). Render slot/name/level on the LOG_IN scene. **(this PR)** |
 | M3 | Renderer foundation | SDL3 GPU wrapper, shader pipeline, 2D sprite/quad batcher, BMFont text. Replaces `glBegin/glEnd` paths in `ZzzOpenglUtil`. |
 | M4 | Texture loader (OZJ/OZB/OZT/JPG) | Port the JPEG-Turbo + custom OZJ/OZB decoders from `ZzzTexture.cpp` to SDL3 textures. |
 | M5 | Audio | SDL3 audio device + WAV/Ogg streamer replacing `DSplaysound.cpp` + `wzAudio.lib`. |
@@ -127,7 +128,7 @@ Server target: `180.93.43.39:44405` (Season 6.15 OpenMU compatible).
   `F1 00` packet, and renders
   `Entered: result=0x01 playerId=512 version="10404"` on screen.
 
-### M2.7 — LoginLongPasswordRequest + LoginResponse *(this PR)*
+### M2.7 — LoginLongPasswordRequest + LoginResponse
 
 * Extend `mu::proto::GameServerSession` with two new phases
   (`LoggingIn`, `LoggedIn` / `LoginFailed`) and a `start_login(account,
@@ -156,6 +157,29 @@ Server target: `180.93.43.39:44405` (Season 6.15 OpenMU compatible).
   `docs/m2.7-login-success.png`).  This proves the full M2 codec stack
   (Xor3 / Xor32 / SimpleModulus + C3 framing) is wire-compatible with
   the OpenMU server end-to-end.
+
+### M2.8 — RequestCharacterList + CharacterList parse *(this PR)*
+
+* Extend `mu::proto::GameServerSession` with two more phases
+  (`CharacterListRequested`, `CharacterListReceived`) and a
+  `start_character_list_request(language)` method that queues the
+  5-byte plaintext `C1 05 F3 00 <lang>` RequestCharacterList packet.
+  Valid only when `phase() == Phase::LoggedIn`, so callers may invoke
+  it idempotently.
+* `LogInScene::render` auto-triggers the request once it observes
+  `Phase::LoggedIn`, so the character list arrives without any extra
+  keystroke after the login success animation. The scene renders
+  slot/name/level/status for each entry returned by the server.
+* `parse_character_list` auto-detects classic (34 bytes/char, 18B
+  appearance) vs extended (44 bytes/char, 27B appearance) layouts
+  from the trailing-payload length so the same client speaks to both
+  pre-S6 and Season-6+ servers without configuration. Each
+  `CharacterEntry` exposes slot, name, level (LE u16), status nibble,
+  item-block flag, raw appearance bytes, and guild position.
+* Eight new unit tests in `protocol_tests.cpp` (no-op-before-LoggedIn,
+  request packet layout, language-byte echo, classic 1-char parse,
+  classic 2-char parse, extended-variant parse, zero-char parse,
+  mismatched-length-marks-error); 37 total now pass.
 
 ### M3 — Renderer foundation
 

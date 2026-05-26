@@ -17,12 +17,24 @@ namespace {
 const char* phase_label(proto::GameServerSession::Phase p) {
     using P = proto::GameServerSession::Phase;
     switch (p) {
-        case P::WaitingForEntered: return "waiting for GameServerEntered";
-        case P::Entered:           return "entered (ready to log in)";
-        case P::LoggingIn:         return "login request in flight";
-        case P::LoggedIn:          return "LOGGED IN";
-        case P::LoginFailed:       return "login rejected by server";
-        case P::Error:             return "error";
+        case P::WaitingForEntered:      return "waiting for GameServerEntered";
+        case P::Entered:                return "entered (ready to log in)";
+        case P::LoggingIn:              return "login request in flight";
+        case P::LoggedIn:               return "LOGGED IN";
+        case P::LoginFailed:            return "login rejected by server";
+        case P::CharacterListRequested: return "requested character list ...";
+        case P::CharacterListReceived:  return "character list ready";
+        case P::Error:                  return "error";
+    }
+    return "?";
+}
+
+const char* variant_label(proto::GameServerSession::CharacterListVariant v) {
+    using V = proto::GameServerSession::CharacterListVariant;
+    switch (v) {
+        case V::Classic:  return "classic 34B";
+        case V::Extended: return "extended 44B";
+        case V::Unknown:  return "unknown";
     }
     return "?";
 }
@@ -53,8 +65,9 @@ std::string resolve(const char* env, const char* hint, const char* fb) {
 }  // namespace
 
 void LogInScene::on_enter(App& /*app*/) {
-    log::info("LogInScene: M2.7 -- LoginLongPasswordRequest handshake");
-    submitted_ = false;
+    log::info("LogInScene: M2.7/M2.8 -- login + character list handshake");
+    submitted_       = false;
+    requested_chars_ = false;
 }
 
 void LogInScene::on_event(App& app, const SDL_Event& ev) {
@@ -64,6 +77,17 @@ void LogInScene::on_event(App& app, const SDL_Event& ev) {
     if (ev.type == SDL_EVENT_KEY_DOWN && ev.key.key == SDLK_BACKSPACE) {
         app.scenes().set_current(app, SceneId::ServerList);
     }
+}
+
+void LogInScene::maybe_request_character_list(App& app) {
+    if (requested_chars_) return;
+    auto* gs = app.game_server_mut();
+    if (!gs) return;
+    if (gs->phase() != proto::GameServerSession::Phase::LoggedIn) return;
+
+    log::info("LogInScene: requesting character list (F3 00)");
+    gs->start_character_list_request(0);
+    requested_chars_ = true;
 }
 
 void LogInScene::submit_login(App& app) {
@@ -98,8 +122,12 @@ void LogInScene::submit_login(App& app) {
 }
 
 void LogInScene::render(App& app, Renderer& r) {
+    // Drive the M2.8 follow-up the same way we draw: once per frame.
+    // It's a no-op until phase() == LoggedIn and self-latches after.
+    maybe_request_character_list(app);
+
     r.set_clear_color(8, 12, 28, 255);
-    r.draw_text(16, 16, "[M2.7] Scene 2 -- LOG_IN  (encrypted login handshake)",
+    r.draw_text(16, 16, "[M2.8] Scene 2 -- LOG_IN  (login + character list)",
                 240, 220, 120);
 
     char tcp_line[160];
@@ -132,21 +160,61 @@ void LogInScene::render(App& app, Renderer& r) {
 
         const auto p = gs->phase();
         using P = proto::GameServerSession::Phase;
-        if (p == P::LoggedIn || p == P::LoginFailed) {
+        const bool logged_in_now =
+            p == P::LoggedIn || p == P::LoginFailed ||
+            p == P::CharacterListRequested ||
+            p == P::CharacterListReceived;
+        if (logged_in_now) {
             char login_line[160];
             std::snprintf(login_line, sizeof(login_line),
                           "LoginResponse: 0x%02X (%s)",
                           static_cast<unsigned>(gs->login_result()),
                           proto::GameServerSession::describe_login_result(
                               gs->login_result()));
-            const std::uint8_t cr = p == P::LoggedIn ? 120 : 255;
-            const std::uint8_t cg = p == P::LoggedIn ? 240 : 100;
-            const std::uint8_t cb = p == P::LoggedIn ? 120 : 100;
+            const bool ok = p != P::LoginFailed;
+            const std::uint8_t cr = ok ? 120 : 255;
+            const std::uint8_t cg = ok ? 240 : 100;
+            const std::uint8_t cb = ok ? 120 : 100;
             r.draw_text(16, 112, login_line, cr, cg, cb);
-            r.draw_text(16, 132,
-                        "Character list + world enter ship in M4+ "
-                        "(see ROADMAP.md).",
-                        200, 200, 200);
+
+            if (p == P::CharacterListRequested) {
+                r.draw_text(16, 132,
+                            "Waiting for CharacterList (F3 00) ...",
+                            200, 220, 140);
+            } else if (p == P::CharacterListReceived) {
+                char hdr[160];
+                std::snprintf(hdr, sizeof(hdr),
+                              "Characters (%zu, variant=%s, vault_ext=%s):",
+                              gs->characters().size(),
+                              variant_label(gs->character_list_variant()),
+                              gs->is_vault_extended() ? "yes" : "no");
+                r.draw_text(16, 132, hdr, 200, 200, 200);
+
+                int y = 152;
+                int idx = 0;
+                for (const auto& c : gs->characters()) {
+                    char line[160];
+                    std::snprintf(line, sizeof(line),
+                                  "  slot=%u  name=\"%s\"  level=%u  status=%u%s",
+                                  static_cast<unsigned>(c.slot_index),
+                                  c.name.c_str(),
+                                  static_cast<unsigned>(c.level),
+                                  static_cast<unsigned>(c.status),
+                                  c.item_block_active ? "  [item-blocked]" : "");
+                    r.draw_text(16, y, line, 160, 240, 160);
+                    y += 18;
+                    if (++idx >= 8) break;  // safety cap on render
+                }
+            } else if (p == P::LoggedIn) {
+                r.draw_text(16, 132,
+                            "Login ok -- requesting character list ...",
+                            200, 200, 200);
+            } else {
+                r.draw_text(16, 132,
+                            "Character list + world enter ship in M3+ "
+                            "(see ROADMAP.md).",
+                            200, 200, 200);
+            }
         } else if (p == P::Error) {
             r.draw_text(16, 112,
                         "GameServer error: " + gs->last_error(),

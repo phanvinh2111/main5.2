@@ -20,6 +20,18 @@
 //     Encrypted on the wire by `Connection(Codec::GameServer)` via
 //     Xor32 + SimpleModulus.
 //
+// Inbound + outbound (M2.8):
+//   * RequestCharacterList  (C1 F3 00, 5 bytes, plaintext): sent right
+//     after LoginResponse=Okay. One trailing byte selects the client
+//     language (OpenMU just echoes it).
+//   * CharacterList         (C1 F3 00, variable length): server's reply.
+//     Header is `UnlockFlags(1) MoveCnt(1) CharacterCount(N) IsVaultExtended(1)`
+//     followed by N character structures. OpenMU emits two variants
+//     depending on the server's configured Season -- classic (34B per
+//     character, 18B appearance) or extended (44B per character, 27B
+//     appearance). We auto-detect from the remaining payload length and
+//     populate Phase::CharacterListReceived either way.
+//
 // The C1 framing prefix means the LoginResponse is *not* encrypted on
 // the wire (both SimpleModulus and Xor32 pass C1/C2 through). The
 // LoginLongPasswordRequest IS encrypted (C3 prefix) and exercises the
@@ -39,7 +51,35 @@ public:
         LoggingIn,
         LoggedIn,
         LoginFailed,
+        CharacterListRequested,
+        CharacterListReceived,
         Error,
+    };
+
+    // Layout variant of the F3 00 CharacterList packet.
+    //   * Classic   -- Season 1..5, 34 bytes/char, 18B appearance.
+    //   * Extended  -- Season 6+,    44 bytes/char, 27B appearance.
+    // Determined at parse time by checking the remaining payload
+    // length against `4 + N * 34` or `4 + N * 44`.
+    enum class CharacterListVariant : std::uint8_t {
+        Unknown  = 0,
+        Classic  = 34,
+        Extended = 44,
+    };
+
+    // One row in the character selection list.  Mirrors OpenMU's
+    // `CharacterData` structure from
+    // `ServerToClient/ServerToClientPackets.xml` -- we keep only the
+    // fields the LOG_IN scene needs to render.  `appearance` is the
+    // raw 18 or 27 bytes from the wire (interpreted by M6+ later).
+    struct CharacterEntry {
+        std::uint8_t slot_index = 0;
+        std::string  name;
+        std::uint16_t level = 0;
+        std::uint8_t status = 0;       // low nibble of byte 14
+        bool         item_block_active = false; // high nibble of byte 14
+        std::vector<std::uint8_t> appearance;
+        std::uint8_t guild_position = 0;
     };
 
     // OpenMU `LoginResult` enum from
@@ -93,6 +133,14 @@ public:
                      const std::uint8_t client_serial[16],
                      std::uint32_t tick_count);
 
+    // Queue a 5-byte `C1 05 F3 00 <language>` RequestCharacterList
+    // packet.  Valid only when phase() == Phase::LoggedIn -- a no-op
+    // otherwise, so callers may invoke it unconditionally after
+    // observing `Phase::LoggedIn`.  `language` is forwarded verbatim
+    // (OpenMU does not gate on its value; the original client passes
+    // 0).
+    void start_character_list_request(std::uint8_t language = 0);
+
     Phase phase() const noexcept { return phase_; }
 
     // GameServerEntered fields (populated after Phase::Entered).
@@ -104,12 +152,24 @@ public:
     // Phase::LoginFailed).
     LoginResult login_result() const noexcept    { return login_result_; }
 
+    // CharacterList fields (populated after Phase::CharacterListReceived).
+    CharacterListVariant character_list_variant() const noexcept {
+        return character_list_variant_;
+    }
+    std::uint8_t unlock_flags()    const noexcept { return unlock_flags_; }
+    std::uint8_t move_count()      const noexcept { return move_count_; }
+    bool         is_vault_extended() const noexcept { return is_vault_extended_; }
+    const std::vector<CharacterEntry>& characters() const noexcept {
+        return characters_;
+    }
+
     const std::string& last_error() const noexcept { return error_; }
     const std::string& last_unknown() const noexcept { return last_unknown_; }
 
 private:
     void parse_entered(const std::uint8_t* body, std::size_t len);
     void parse_login_response(const std::uint8_t* body, std::size_t len);
+    void parse_character_list(const std::uint8_t* body, std::size_t len);
     void fail(std::string msg);
 
     Phase phase_ = Phase::WaitingForEntered;
@@ -118,6 +178,12 @@ private:
     std::uint16_t player_id_ = 0;
     std::string   version_;
     LoginResult   login_result_ = LoginResult::Unknown;
+    CharacterListVariant character_list_variant_ =
+        CharacterListVariant::Unknown;
+    std::uint8_t  unlock_flags_      = 0;
+    std::uint8_t  move_count_        = 0;
+    bool          is_vault_extended_ = false;
+    std::vector<CharacterEntry> characters_;
     std::string   error_;
     std::string   last_unknown_;
 };

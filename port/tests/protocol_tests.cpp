@@ -801,6 +801,263 @@ TEST(game_server_session_parses_login_wrong_version_response) {
     }
 }
 
+// ---------------------------------------------------------------------
+// M2.8: RequestCharacterList outbound + CharacterList inbound.
+//
+// Drives a session to Phase::LoggedIn, then verifies that
+// `start_character_list_request` queues a 5-byte plaintext C1 packet and
+// that the server's response is parsed into `CharacterEntry` rows for
+// both the classic (34B) and extended (44B) variants.
+// ---------------------------------------------------------------------
+
+namespace m28 {
+
+// Drive a fresh GameServerSession to Phase::LoggedIn so character-list
+// tests don't have to copy the same setup twice.
+inline void drive_to_logged_in(mu::proto::GameServerSession& s) {
+    const std::uint8_t entered_pkt[] = {
+        0xC1, 0x0C, 0xF1, 0x00, 0x01, 0x02, 0x00,
+        0x31, 0x30, 0x34, 0x30, 0x34
+    };
+    s.on_packet(entered_pkt, sizeof(entered_pkt));
+    const std::uint8_t ok_pkt[] = {0xC1, 0x05, 0xF1, 0x01, 0x01};
+    s.on_packet(ok_pkt, sizeof(ok_pkt));
+}
+
+// Build a CharacterList payload (without the C1 header).  The caller
+// passes the variant entry-size (34 or 44) and a flat slice of pre-
+// filled entry bytes whose total length must equal `count * entry_size`.
+inline std::vector<std::uint8_t> make_char_list_packet(
+        std::uint8_t unlock_flags,
+        std::uint8_t move_count,
+        std::uint8_t character_count,
+        bool         vault_extended,
+        const std::vector<std::uint8_t>& entries) {
+    const std::size_t total = 4 + entries.size();
+    std::vector<std::uint8_t> pkt;
+    pkt.reserve(4 + total);
+    pkt.push_back(0xC1);
+    pkt.push_back(static_cast<std::uint8_t>(4 + total));
+    pkt.push_back(0xF3);
+    pkt.push_back(0x00);
+    pkt.push_back(unlock_flags);
+    pkt.push_back(move_count);
+    pkt.push_back(character_count);
+    pkt.push_back(vault_extended ? 0x01 : 0x00);
+    pkt.insert(pkt.end(), entries.begin(), entries.end());
+    return pkt;
+}
+
+// Build a single CharacterData blob.  Classic and extended variants
+// differ in both appearance length (18 vs 27) and total entry size
+// (34 vs 44 -- the extended variant has a trailing padding byte after
+// GuildPosition, matching OpenMU's `Structure.Length=44` while
+// `GuildPosition.Index=42`).
+inline std::vector<std::uint8_t> make_char_entry(
+        std::uint8_t slot,
+        const std::string& name,
+        std::uint16_t level,
+        std::uint8_t status_low_nibble,
+        bool item_blocked,
+        std::uint8_t guild_position,
+        std::size_t appearance_len) {
+    // The parser locates GuildPosition at offset 15 + appearance_len.
+    // Total entry length is 34 (classic) or 44 (extended) per OpenMU.
+    const std::size_t guild_off  = 15 + appearance_len;
+    const std::size_t entry_size = (appearance_len == 27) ? 44 : 34;
+    std::vector<std::uint8_t> e(entry_size, 0);
+    e[0] = slot;
+    std::memcpy(e.data() + 1, name.data(),
+                std::min<std::size_t>(name.size(), 10));
+    e[12] = static_cast<std::uint8_t>(level & 0xFF);
+    e[13] = static_cast<std::uint8_t>((level >> 8) & 0xFF);
+    e[14] = static_cast<std::uint8_t>(
+        (status_low_nibble & 0x0F) | (item_blocked ? 0xF0 : 0x00));
+    // Appearance bytes left zero -- their layout is M6+ scope.  Fill a
+    // recognisable pattern so the parser's copy-out can be verified.
+    for (std::size_t i = 0; i < appearance_len; ++i) {
+        e[15 + i] = static_cast<std::uint8_t>(0xA0 + i);
+    }
+    e[guild_off] = guild_position;
+    return e;
+}
+
+}  // namespace m28
+
+TEST(game_server_session_request_character_list_before_logged_in_is_noop) {
+    mu::proto::GameServerSession s;
+    // Not yet Entered, let alone LoggedIn.
+    s.start_character_list_request(0);
+    if (!s.take_outbound().empty()) {
+        fail("RequestCharacterList before LoggedIn must not queue any packet");
+    }
+}
+
+TEST(game_server_session_request_character_list_packet_layout) {
+    mu::proto::GameServerSession s;
+    m28::drive_to_logged_in(s);
+    // Discard the LoginLongPasswordRequest queued by start_login -- the
+    // helper above does NOT call start_login, so the queue is empty.
+    if (!s.take_outbound().empty()) {
+        fail("setup: take_outbound should be empty after drive_to_logged_in");
+    }
+    s.start_character_list_request(0);
+    if (s.phase() !=
+        mu::proto::GameServerSession::Phase::CharacterListRequested) {
+        fail("phase must be CharacterListRequested after the call");
+    }
+    auto out = s.take_outbound();
+    if (out.size() != 1) fail("must queue exactly one outbound packet");
+    const auto& p = out[0];
+    if (p.size() != 5) fail("RequestCharacterList must be 5 bytes");
+    if (p[0] != 0xC1) fail("byte 0 must be C1 prefix");
+    if (p[1] != 0x05) fail("byte 1 must be length 0x05");
+    if (p[2] != 0xF3) fail("byte 2 must be head 0xF3");
+    if (p[3] != 0x00) fail("byte 3 must be sub 0x00");
+    if (p[4] != 0x00) fail("byte 4 must be language 0x00");
+}
+
+TEST(game_server_session_request_character_list_language_byte) {
+    mu::proto::GameServerSession s;
+    m28::drive_to_logged_in(s);
+    s.start_character_list_request(0x07);
+    auto out = s.take_outbound();
+    if (out.size() != 1 || out[0].size() != 5 || out[0][4] != 0x07) {
+        fail("language byte must be forwarded verbatim");
+    }
+}
+
+TEST(game_server_session_parses_character_list_classic_one_char) {
+    mu::proto::GameServerSession s;
+    m28::drive_to_logged_in(s);
+
+    auto e0 = m28::make_char_entry(
+        /*slot=*/0, "MyKnight", /*level=*/42,
+        /*status_low_nibble=*/0, /*item_blocked=*/false,
+        /*guild_position=*/0, /*appearance_len=*/18);
+    if (e0.size() != 34) fail("classic entry must be 34 bytes");
+
+    auto pkt = m28::make_char_list_packet(
+        /*unlock_flags=*/0x00,
+        /*move_count=*/0x00,
+        /*character_count=*/1,
+        /*vault_extended=*/false,
+        e0);
+    s.on_packet(pkt.data(), pkt.size());
+
+    if (s.phase() !=
+        mu::proto::GameServerSession::Phase::CharacterListReceived) {
+        fail("phase must be CharacterListReceived after one-char parse");
+    }
+    if (s.character_list_variant() !=
+        mu::proto::GameServerSession::CharacterListVariant::Classic) {
+        fail("variant must be Classic for 34-byte entry");
+    }
+    if (s.characters().size() != 1) fail("must parse 1 character");
+    const auto& c = s.characters()[0];
+    if (c.slot_index != 0)         fail("slot must be 0");
+    if (c.name != "MyKnight")      fail("name must be \"MyKnight\"");
+    if (c.level != 42)             fail("level must be 42");
+    if (c.status != 0)             fail("status must be 0");
+    if (c.item_block_active)       fail("item_block_active must be false");
+    if (c.appearance.size() != 18) fail("appearance must be 18 bytes");
+    if (c.appearance[0] != 0xA0)   fail("appearance bytes must round-trip");
+}
+
+TEST(game_server_session_parses_character_list_classic_two_chars) {
+    mu::proto::GameServerSession s;
+    m28::drive_to_logged_in(s);
+
+    auto e0 = m28::make_char_entry(0, "Alpha", 10, 0, false, 0, 18);
+    auto e1 = m28::make_char_entry(1, "Beta",  20, 1, true,  2, 18);
+    std::vector<std::uint8_t> entries;
+    entries.insert(entries.end(), e0.begin(), e0.end());
+    entries.insert(entries.end(), e1.begin(), e1.end());
+    auto pkt = m28::make_char_list_packet(0, 0, 2, true, entries);
+
+    s.on_packet(pkt.data(), pkt.size());
+    if (s.phase() !=
+        mu::proto::GameServerSession::Phase::CharacterListReceived) {
+        fail("phase must be CharacterListReceived");
+    }
+    if (!s.is_vault_extended()) {
+        fail("vault-extended flag must be true");
+    }
+    if (s.characters().size() != 2) fail("must parse 2 characters");
+    if (s.characters()[0].name != "Alpha") fail("entry 0 name");
+    if (s.characters()[1].name != "Beta")  fail("entry 1 name");
+    if (s.characters()[1].level != 20)     fail("entry 1 level");
+    if (s.characters()[1].status != 1)     fail("entry 1 status nibble");
+    if (!s.characters()[1].item_block_active) {
+        fail("entry 1 item_block_active must be true");
+    }
+    if (s.characters()[1].guild_position != 2) {
+        fail("entry 1 guild position must be 2");
+    }
+}
+
+TEST(game_server_session_parses_character_list_extended_variant) {
+    mu::proto::GameServerSession s;
+    m28::drive_to_logged_in(s);
+
+    auto e0 = m28::make_char_entry(3, "ExtendedDK", 400, 2, false, 5, 27);
+    if (e0.size() != 44) fail("extended entry must be 44 bytes");
+
+    auto pkt = m28::make_char_list_packet(0x80, 1, 1, false, e0);
+    s.on_packet(pkt.data(), pkt.size());
+
+    if (s.phase() !=
+        mu::proto::GameServerSession::Phase::CharacterListReceived) {
+        fail("phase must be CharacterListReceived (extended)");
+    }
+    if (s.character_list_variant() !=
+        mu::proto::GameServerSession::CharacterListVariant::Extended) {
+        fail("variant must be Extended for 44-byte entry");
+    }
+    if (s.unlock_flags() != 0x80) fail("unlock_flags must be 0x80");
+    if (s.move_count() != 1)      fail("move_count must be 1");
+    if (s.characters().size() != 1) fail("must parse 1 character");
+    if (s.characters()[0].name != "ExtendedDK") fail("name must be \"ExtendedDK\"");
+    if (s.characters()[0].level != 400)         fail("level must be 400");
+    if (s.characters()[0].appearance.size() != 27) {
+        fail("appearance must be 27 bytes for extended variant");
+    }
+    if (s.characters()[0].guild_position != 5) {
+        fail("guild_position must be 5 (extended trailing byte)");
+    }
+}
+
+TEST(game_server_session_parses_character_list_zero_chars) {
+    mu::proto::GameServerSession s;
+    m28::drive_to_logged_in(s);
+
+    // Empty list: just the 4-byte header after the C1 frame.
+    auto pkt = m28::make_char_list_packet(0, 0, 0, false, {});
+    s.on_packet(pkt.data(), pkt.size());
+
+    if (s.phase() !=
+        mu::proto::GameServerSession::Phase::CharacterListReceived) {
+        fail("phase must be CharacterListReceived even with 0 characters");
+    }
+    if (!s.characters().empty()) fail("characters() must be empty");
+}
+
+TEST(game_server_session_character_list_mismatched_length_marks_error) {
+    mu::proto::GameServerSession s;
+    m28::drive_to_logged_in(s);
+
+    // Header claims 1 character, but the entry body is neither 34 nor
+    // 44 bytes -- payload 4 + 30 = 34 total, which divides cleanly by
+    // neither variant when count > 0.
+    std::vector<std::uint8_t> bad(30, 0);
+    auto pkt = m28::make_char_list_packet(0, 0, /*count=*/1, false, bad);
+    s.on_packet(pkt.data(), pkt.size());
+
+    if (s.phase() != mu::proto::GameServerSession::Phase::Error) {
+        fail("mismatched length must transition to Error phase");
+    }
+}
+
 }  // namespace
 
 int main() {

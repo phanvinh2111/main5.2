@@ -15,12 +15,17 @@ public:
 
 private:
     void submit_login(App& app);
+    void maybe_request_character_list(App& app);
 
     // Latched on first submit so a long-held Enter / mashed key
     // doesn't fire multiple LoginLongPasswordRequest packets.  Reset
     // when the scene is re-entered (e.g. after Backspace -> server
     // list -> Enter -> log in).
     bool submitted_ = false;
+
+    // Latched once we have asked the server for the character list
+    // (M2.8).  Same idempotency reasoning as `submitted_`.
+    bool requested_chars_ = false;
 };
 
 }  // namespace mu
