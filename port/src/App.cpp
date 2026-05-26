@@ -115,6 +115,7 @@ void App::shutdown() {
     // Tear down the codec layer BEFORE the TcpClient, since the
     // Connection holds a reference back into tcp_.
     connect_session_.reset();
+    game_session_.reset();
     connection_.reset();
     tcp_.disconnect();
     renderer_.shutdown();
@@ -137,15 +138,60 @@ void App::on_event(const SDL_Event& ev) {
     scenes_.on_event(*this, ev);
 }
 
+namespace {
+
+void log_packet(const char* dir, const std::vector<std::uint8_t>& p) {
+    if (p.empty()) return;
+    const int hdr = proto::header_size_for_prefix(p[0]);
+    const std::uint8_t head = (hdr > 0 && p.size() > std::size_t(hdr)) ?
+                              p[hdr] : 0;
+    const std::uint8_t sub  = (hdr > 0 && p.size() > std::size_t(hdr + 1)) ?
+                              p[hdr + 1] : 0;
+    log::info("App: %s %zu byte packet, head=0x%02X sub=0x%02X",
+              dir, p.size(),
+              static_cast<unsigned>(head),
+              static_cast<unsigned>(sub));
+}
+
+}  // namespace
+
+void App::pump_network() {
+    switch (stage_) {
+        case NetStage::ConnectServer: pump_connect_server(); break;
+        case NetStage::GameServer:    pump_game_server();    break;
+    }
+}
+
+void App::start_game_server_dial(const std::string& host,
+                                 std::uint16_t port) {
+    if (stage_ == NetStage::GameServer) {
+        log::warn("App: start_game_server_dial called twice, ignoring");
+        return;
+    }
+    log::info("App: switching ConnectServer -> GameServer dial %s:%u",
+              host.c_str(), static_cast<unsigned>(port));
+
+    // Tear down ConnectServer codec stack FIRST.  Connection holds a
+    // reference to tcp_, so its destructor must run before we touch
+    // the underlying socket worker.
+    connect_session_.reset();
+    connection_.reset();
+    connect_info_requested_ = false;
+
+    tcp_.disconnect();
+    server_host_ = host;
+    server_port_ = port;
+    tcp_.connect(server_host_, server_port_);
+
+    stage_ = NetStage::GameServer;
+}
+
 void App::pump_connect_server() {
     if (tcp_.state() != net::TcpState::Connected) {
         return;
     }
-    // Lazy init on first reach of `Connected`.  The port 44405 endpoint
-    // is OpenMU's ConnectServer, which speaks Plain (no encryption).
-    // M2.5 stops at the ConnectServer dialogue; the subsequent
-    // GameServer dial will switch to a separate Codec::GameServer
-    // Connection in a follow-up milestone.
+    // Lazy init on first reach of `Connected`.  Port 44405 is the
+    // OpenMU ConnectServer, which speaks Plain (no encryption).
     if (!connection_) {
         connection_.emplace(tcp_, proto::Connection::Codec::Plain);
         connect_session_.emplace();
@@ -153,19 +199,6 @@ void App::pump_connect_server() {
                   server_host_.c_str(),
                   static_cast<unsigned>(server_port_));
     }
-
-    auto log_packet = [](const char* dir, const std::vector<std::uint8_t>& p) {
-        if (p.empty()) return;
-        const int hdr = proto::header_size_for_prefix(p[0]);
-        const std::uint8_t head = (hdr > 0 && p.size() > std::size_t(hdr)) ?
-                                  p[hdr] : 0;
-        const std::uint8_t sub  = (hdr > 0 && p.size() > std::size_t(hdr + 1)) ?
-                                  p[hdr + 1] : 0;
-        log::info("App: %s %zu byte packet, head=0x%02X sub=0x%02X",
-                  dir, p.size(),
-                  static_cast<unsigned>(head),
-                  static_cast<unsigned>(sub));
-    };
 
     try {
         auto packets = connection_->poll_packets();
@@ -196,6 +229,38 @@ void App::pump_connect_server() {
     }
 }
 
+void App::pump_game_server() {
+    if (tcp_.state() != net::TcpState::Connected) {
+        return;
+    }
+    // Lazy init on first reach of `Connected` after switching stage.
+    if (!connection_) {
+        connection_.emplace(tcp_, proto::Connection::Codec::GameServer);
+        game_session_.emplace();
+        log::info("App: GameServer session opened against %s:%u",
+                  server_host_.c_str(),
+                  static_cast<unsigned>(server_port_));
+    }
+
+    try {
+        auto packets = connection_->poll_packets();
+        for (const auto& pkt : packets) {
+            log_packet("<<-", pkt);
+            game_session_->on_packet(pkt.data(), pkt.size());
+        }
+    } catch (const std::exception& e) {
+        log::error("App: GameServer codec error: %s", e.what());
+    }
+
+    // Outbound queue is empty in M2.6; reserved for login (M3+).
+    for (const auto& pkt : game_session_->take_outbound()) {
+        log_packet("->>", pkt);
+        if (!connection_->send_packet(pkt.data(), pkt.size())) {
+            log::error("App: GameServer failed to ship outbound packet");
+        }
+    }
+}
+
 bool App::tick() {
     if (quit_) return false;
 
@@ -203,7 +268,7 @@ bool App::tick() {
     const float  dt     = static_cast<float>((now_ms - last_ms_) / 1000.0);
     last_ms_            = now_ms;
 
-    pump_connect_server();
+    pump_network();
     scenes_.update(*this, dt);
 
     renderer_.begin_frame();

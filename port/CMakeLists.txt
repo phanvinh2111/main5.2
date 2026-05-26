@@ -43,6 +43,7 @@ set(MUMOBILE_CORE_SOURCES
     src/Protocol/SimpleModulus.cpp
     src/Protocol/Connection.cpp
     src/Protocol/ConnectServerSession.cpp
+    src/Protocol/GameServerSession.cpp
     src/Scene/SceneManager.cpp
     src/Scene/ServerListScene.cpp
     src/Scene/WebzenScene.cpp

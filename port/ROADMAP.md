@@ -13,7 +13,8 @@ Server target: `180.93.43.39:44405` (Season 6.15 OpenMU compatible).
 |---|---|---|
 | M1 | Skeleton + scene state machine + TCP | Project layout, CMake, SDL3 main callbacks, scene FSM, BSD-socket client. |
 | **M2** | **Packet codec (Xor3 / Xor32 / SimpleModulus + framing)** | C++ port of OpenMU's `Network/` codec — byte-exact with upstream C# reference vectors. **(this PR)** |
-| **M2.5** | **Protocol pump (ConnectServer)** | Wire `mu::proto::Connection` (Codec::Plain) into the SceneManager, complete the ConnectServer dialogue against `180.93.43.39:44405`, surface the game-server endpoint on the SERVER_LIST scene. **(this PR)** |
+| M2.5 | Protocol pump (ConnectServer) | Wire `mu::proto::Connection` (Codec::Plain) into the SceneManager, complete the ConnectServer dialogue against `180.93.43.39:44405`, surface the game-server endpoint on the SERVER_LIST scene. |
+| **M2.6** | **Game-server dial + GameServerEntered parse** | Tear down ConnectServer codec, re-dial TCP at the resolved endpoint, switch to Codec::GameServer, parse the `F1 00 GameServerEntered` packet, display version/playerId on LOG_IN. **(this PR)** |
 | M3 | Renderer foundation | SDL3 GPU wrapper, shader pipeline, 2D sprite/quad batcher, BMFont text. Replaces `glBegin/glEnd` paths in `ZzzOpenglUtil`. |
 | M4 | Texture loader (OZJ/OZB/OZT/JPG) | Port the JPEG-Turbo + custom OZJ/OZB decoders from `ZzzTexture.cpp` to SDL3 textures. |
 | M5 | Audio | SDL3 audio device + WAV/Ogg streamer replacing `DSplaysound.cpp` + `wzAudio.lib`. |
@@ -99,6 +100,31 @@ Server target: `180.93.43.39:44405` (Season 6.15 OpenMU compatible).
   receives the hello, requests the server list, gets back 1 entry
   (id=0, load=0%), requests the connection info, and displays the
   resolved endpoint `180.93.43.39:55901` on screen.
+
+### M2.6 — Game-server dial + GameServerEntered parse *(this PR)*
+
+* Extend the App's network ownership so it can drive **two** protocol
+  stages on the same `TcpClient` -- `NetStage::ConnectServer` (M2.5) and
+  `NetStage::GameServer` (this milestone) -- with a clean transition.
+* New `App::start_game_server_dial(host, port)`: tears down the
+  ConnectServer `Connection` + `ConnectServerSession`, disconnects the
+  TCP worker, re-dials at the resolved game-server endpoint, and
+  flips `stage_` so the next pump constructs a fresh `Connection` with
+  `Codec::GameServer` plus a `GameServerSession`.
+* New `mu::proto::GameServerSession` -- I/O-free state machine,
+  symmetric to `ConnectServerSession`. The first server packet is a
+  plaintext `C1 0C F1 00 ...` "GameServerEntered" frame; the session
+  parses its result byte, BE player-id, and 5-byte ASCII version
+  string ("10404" on the reference server).
+* `ServerListScene` advance now triggers the stage transition rather
+  than just changing the scene. `LogInScene` is rewritten to display
+  the GameServer phase + result/playerId/version once `Entered`.
+* Three new tests in `protocol_tests.cpp` (parses-entered, short-
+  payload-marks-error, unknown-packet-not-fatal); 24 total now pass.
+* Verified live: against `180.93.43.39`, the binary completes the
+  ConnectServer dialogue, transitions to `:55901`, receives the
+  `F1 00` packet, and renders
+  `Entered: result=0x01 playerId=512 version="10404"` on screen.
 
 ### M3 — Renderer foundation
 
