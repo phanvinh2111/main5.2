@@ -19,10 +19,10 @@ dependency with portable C++17 + SDL3:
 
 ## Status
 
-This is **Milestone 1 (M1)** of the multi-PR full port roadmap. See
-[`ROADMAP.md`](./ROADMAP.md) for the full plan.
+This branch ships **Milestone 2 (M2)** of the multi-PR full port roadmap on
+top of M1. See [`ROADMAP.md`](./ROADMAP.md) for the full plan.
 
-What M1 delivers:
+What M1 delivered:
 
 * CMake build system targeting Linux (host/dev), iOS, and Android via SDL3
 * SDL3 main-callbacks entry point shared across all platforms
@@ -37,12 +37,30 @@ What M1 delivers:
 * Default game server address baked in as a compile-time define so
   `EGameScene::SERVER_LIST` can dial straight to `180.93.43.39:44405`
 
-What M1 explicitly does **not** deliver (see roadmap for which milestone owns
-each item):
+What M2 adds (this PR):
+
+* `port/src/Protocol/` — a portable C++17 port of the MUnique/OpenMU
+  network codec used by the Season 6 Episode 3 client:
+  * `Framing` — C1/C2/C3/C4 prefix dispatch + length field read/write.
+  * `Keys` — four default key sets (client + server, encrypt + decrypt)
+    plus the 32-byte rolling XOR key from
+    `MUnique.OpenMU.Network.SimpleModulus.DefaultKeys`.
+  * `Xor` — Xor3 (3-byte symmetric) and Xor32 (32-byte rolling).
+  * `SimpleModulus` — 8→11-byte block cipher with counter + checksum.
+  * `Connection` — composes the full client outbound chain
+    `SimpleModulus_enc(Xor32_enc(plaintext))` over `TcpClient`, and the
+    matching inbound chain on receive.
+* `port/tests/protocol_tests.cpp` — 15 unit tests including a
+  byte-exact decode of OpenMU's own `PipelinedDecryptorTests.C3DecryptAsync`
+  reference vector.
+* Linux CI now runs the test target on every PR (`ctest`).
+
+What this branch explicitly does **not** deliver (see roadmap for which
+milestone owns each item):
 
 * 3D rendering, BMD model loading, OZJ/OZB textures, terrain (M3–M6)
 * Audio (M5)
-* MU protocol packet codec for Season 6.15 — only a stub hello frame (M2)
+* Wiring the codec into the SceneManager / replacing the stub hello (M2.5)
 * Character creation, inventory, skills, NPC, party, guild, chat UI (M7–M15)
 * MU Helper bot, master skill tree (M16+)
 * Code-signed IPA / Play Store AAB (M17, requires user-supplied credentials)

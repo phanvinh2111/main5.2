@@ -38,6 +38,10 @@ set(MUMOBILE_CORE_SOURCES
     src/App.cpp
     src/Platform/Log.cpp
     src/Network/TcpClient.cpp
+    src/Protocol/Framing.cpp
+    src/Protocol/Xor.cpp
+    src/Protocol/SimpleModulus.cpp
+    src/Protocol/Connection.cpp
     src/Scene/SceneManager.cpp
     src/Scene/ServerListScene.cpp
     src/Scene/WebzenScene.cpp
@@ -125,3 +129,13 @@ endif()
 
 message(STATUS "mumobile platform: ${MUMOBILE_PLATFORM}")
 message(STATUS "mumobile default server: ${MUMOBILE_SERVER_HOST}:${MUMOBILE_SERVER_PORT}")
+
+# ---------------------------------------------------------------------------
+# Tests (desktop only — CI smoke build runs these)
+# ---------------------------------------------------------------------------
+if(MUMOBILE_PLATFORM STREQUAL "DESKTOP")
+    enable_testing()
+    add_executable(mumobile_protocol_tests tests/protocol_tests.cpp)
+    target_link_libraries(mumobile_protocol_tests PRIVATE mumobile_core)
+    add_test(NAME protocol_tests COMMAND mumobile_protocol_tests)
+endif()

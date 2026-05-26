@@ -11,8 +11,9 @@ Server target: `180.93.43.39:44405` (Season 6.15 OpenMU compatible).
 
 | # | Milestone | Owns |
 |---|---|---|
-| **M1** | **Skeleton + scene state machine + TCP** | Project layout, CMake, SDL3 main callbacks, scene FSM, BSD-socket client. **(this PR)** |
-| M2 | Packet codec & protocol pump | Season 6.15 frame parser, protocol enums, async send/recv queues, dial server. Replaces the C# `ClientLibrary/` DLL with C++. |
+| M1 | Skeleton + scene state machine + TCP | Project layout, CMake, SDL3 main callbacks, scene FSM, BSD-socket client. |
+| **M2** | **Packet codec (Xor3 / Xor32 / SimpleModulus + framing)** | C++ port of OpenMU's `Network/` codec — byte-exact with upstream C# reference vectors. **(this PR)** |
+| M2.5 | Protocol pump | Wire `mu::proto::Connection` into the SceneManager, dispatch real server packets, hello / ConnectServer exchange. |
 | M3 | Renderer foundation | SDL3 GPU wrapper, shader pipeline, 2D sprite/quad batcher, BMFont text. Replaces `glBegin/glEnd` paths in `ZzzOpenglUtil`. |
 | M4 | Texture loader (OZJ/OZB/OZT/JPG) | Port the JPEG-Turbo + custom OZJ/OZB decoders from `ZzzTexture.cpp` to SDL3 textures. |
 | M5 | Audio | SDL3 audio device + WAV/Ogg streamer replacing `DSplaysound.cpp` + `wzAudio.lib`. |
@@ -49,14 +50,35 @@ Server target: `180.93.43.39:44405` (Season 6.15 OpenMU compatible).
 * CI workflow that smoke-builds the Linux target.
 * Roadmap + README documents.
 
-### M2 — Packet codec & protocol pump
+### M2 — Packet codec (this PR)
 
-* Port the MUnique.OpenMU packet definitions used by the Windows client into
-  C++ header structs (replaces the generated C# wrappers in `ClientLibrary/`).
-* Implement xor3 / SimpleModulus / SHA-256 framing exactly as the server
-  expects.
-* Background send/recv queues running on the SDL3 event thread.
-* Replace M1's stub hello with the real `ConnectServer` packet exchange.
+* Ported MUnique/OpenMU's `src/Network` codec to portable C++17 under
+  `port/src/Protocol/`:
+  * `Framing.{h,cpp}` — C1/C2/C3/C4 prefix dispatch and length read/write.
+  * `Keys.h` — the four default key sets (client + server, encrypt +
+    decrypt) and the 32-byte rolling XOR key, taken verbatim from
+    `MUnique.OpenMU.Network.SimpleModulus.DefaultKeys`.
+  * `Xor.{h,cpp}` — Xor3 (3-byte symmetric) and Xor32 (32-byte rolling)
+    matching `PipelinedXor32Encryptor` / `Decryptor` byte-for-byte.
+  * `SimpleModulus.{h,cpp}` — the "new variant" 8→11-byte block cipher
+    with counter and per-block checksum, mirroring
+    `PipelinedSimpleModulusEncryptor` / `Decryptor`.
+  * `Connection.{h,cpp}` — composes `SimpleModulus(Xor32(plaintext))` on
+    send and `Xor32_dec(SimpleModulus_dec(cipher))` on receive, matching
+    `Season6Episode3NetworkEncryptionFactoryPlugIn`.
+* Comprehensive unit tests (`port/tests/protocol_tests.cpp`) — 15 cases
+  including framing, Xor3 known vector, Xor32 round-trip, SimpleModulus
+  block size matching upstream's `C3EncryptDecryptCycleAsync` reference,
+  counter-mismatch rejection, full pipeline round-trip, and a byte-exact
+  decode of OpenMU's `PipelinedDecryptorTests.C3DecryptAsync` cipher.
+* Linux CI now runs the test target on every PR (`ctest`).
+
+### M2.5 — Protocol pump
+
+* Wire `mu::proto::Connection` on top of the existing `TcpClient` from
+  the SDL3 event thread.
+* Replace M1's no-op socket connect with the real `GameServerHello`
+  exchange, then push packets into the `SceneManager`.
 
 ### M3 — Renderer foundation
 
